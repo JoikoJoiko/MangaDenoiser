@@ -1,19 +1,60 @@
 ﻿#include <windows.h>
 #include <shellapi.h>
 #include <string>
+#include <vector>
+#include <filesystem>
 #include <gdiplus.h>
 
 #pragma comment(lib, "gdiplus.lib")
 
 using namespace Gdiplus;
-
-std::wstring g_status = L"Ready";
-std::wstring g_imagePath;
+namespace fs = std::filesystem;
 
 constexpr wchar_t WINDOW_CLASS[] = L"MangaDenoiserWindow";
 constexpr wchar_t WINDOW_TITLE[] = L"Manga Denoiser";
 
 ULONG_PTR g_gdiplusToken;
+
+std::wstring g_status = L"Ready";
+std::vector<std::wstring> g_images;
+
+bool IsImageFile(const fs::path& p)
+{
+    if (!p.has_extension()) return false;
+    auto ext = p.extension().wstring();
+    for (auto& c : ext) c = towlower(c);
+
+    return ext == L".png" || ext == L".jpg" || ext == L".jpeg" ||
+        ext == L".bmp" || ext == L".webp";
+}
+
+void LoadImagesFromPath(const std::wstring& path)
+{
+    g_images.clear();
+
+    fs::path p(path);
+
+    if (fs::is_regular_file(p))
+    {
+        if (IsImageFile(p))
+            g_images.push_back(p.wstring());
+    }
+    else if (fs::is_directory(p))
+    {
+        for (auto& entry : fs::recursive_directory_iterator(p))
+        {
+            if (entry.is_regular_file() && IsImageFile(entry.path()))
+            {
+                g_images.push_back(entry.path().wstring());
+            }
+        }
+    }
+
+    if (!g_images.empty())
+        g_status = L"Loaded: " + std::to_wstring(g_images.size()) + L" images";
+    else
+        g_status = L"No images found";
+}
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
@@ -22,7 +63,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_CREATE:
     {
         DragAcceptFiles(hWnd, TRUE);
-
         HBRUSH brush = CreateSolidBrush(RGB(30, 30, 30));
         SetClassLongPtr(hWnd, GCLP_HBRBACKGROUND, (LONG_PTR)brush);
         return 0;
@@ -31,12 +71,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_DROPFILES:
     {
         HDROP hDrop = (HDROP)wParam;
-        wchar_t filePath[MAX_PATH];
+        wchar_t path[MAX_PATH];
 
-        if (DragQueryFile(hDrop, 0, filePath, MAX_PATH))
+        if (DragQueryFile(hDrop, 0, path, MAX_PATH))
         {
-            g_imagePath = filePath;
-            g_status = L"Image loaded";
+            LoadImagesFromPath(path);
             InvalidateRect(hWnd, nullptr, TRUE);
         }
 
@@ -55,9 +94,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         Graphics graphics(hdc);
         graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
 
-        if (!g_imagePath.empty())
+        if (!g_images.empty())
         {
-            Image image(g_imagePath.c_str());
+            Image image(g_images[0].c_str());
 
             if (image.GetLastStatus() == Ok)
             {
@@ -66,14 +105,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
                 float scale = min(
                     (float)rc.right / imgW,
-                    (float)rc.bottom / imgH
+                    (float)(rc.bottom - 40) / imgH
                 );
 
                 int drawW = (int)(imgW * scale);
                 int drawH = (int)(imgH * scale);
 
                 int x = (rc.right - drawW) / 2;
-                int y = (rc.bottom - drawH) / 2;
+                int y = (rc.bottom - drawH) / 2 - 10;
 
                 graphics.DrawImage(&image, x, y, drawW, drawH);
             }
@@ -98,10 +137,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
             DrawTextW(
                 hdc,
-                L"Drop images here\nor choose a folder",
+                L"Drop images or a folder here",
                 -1,
                 &rc,
-                DT_CENTER | DT_VCENTER | DT_WORDBREAK
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE
             );
 
             SelectObject(hdc, oldFont);
@@ -109,7 +148,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
 
         RECT statusRc = rc;
-        statusRc.top = rc.bottom - 40;
+        statusRc.top = rc.bottom - 35;
 
         SetTextColor(hdc, RGB(180, 180, 180));
 
@@ -177,9 +216,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow)
         hInstance,
         nullptr
     );
-
-    if (!hWnd)
-        return 0;
 
     ShowWindow(hWnd, nCmdShow);
 
