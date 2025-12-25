@@ -2,58 +2,70 @@
 #include <shellapi.h>
 #include <string>
 #include <vector>
-#include <filesystem>
 #include <gdiplus.h>
 
 #pragma comment(lib, "gdiplus.lib")
 
 using namespace Gdiplus;
-namespace fs = std::filesystem;
 
 constexpr wchar_t WINDOW_CLASS[] = L"MangaDenoiserWindow";
 constexpr wchar_t WINDOW_TITLE[] = L"Manga Denoiser";
 
 ULONG_PTR g_gdiplusToken;
 
-std::wstring g_status = L"Ready";
 std::vector<std::wstring> g_images;
+int g_currentIndex = -1;
 
-bool IsImageFile(const fs::path& p)
+std::wstring g_status = L"Ready";
+
+bool IsImageFile(const std::wstring& path)
 {
-    if (!p.has_extension()) return false;
-    auto ext = p.extension().wstring();
+    auto ext = path.substr(path.find_last_of(L'.') + 1);
     for (auto& c : ext) c = towlower(c);
-
-    return ext == L".png" || ext == L".jpg" || ext == L".jpeg" ||
-        ext == L".bmp" || ext == L".webp";
+    return ext == L"png" || ext == L"jpg" || ext == L"jpeg" || ext == L"bmp";
 }
 
-void LoadImagesFromPath(const std::wstring& path)
+void AddImagesFromDrop(HDROP hDrop)
 {
-    g_images.clear();
+    UINT count = DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0);
+    wchar_t path[MAX_PATH];
 
-    fs::path p(path);
+    for (UINT i = 0; i < count; i++)
+    {
+        DragQueryFileW(hDrop, i, path, MAX_PATH);
+        std::wstring p = path;
 
-    if (fs::is_regular_file(p))
-    {
-        if (IsImageFile(p))
-            g_images.push_back(p.wstring());
-    }
-    else if (fs::is_directory(p))
-    {
-        for (auto& entry : fs::recursive_directory_iterator(p))
+        DWORD attr = GetFileAttributesW(p.c_str());
+        if (attr & FILE_ATTRIBUTE_DIRECTORY)
         {
-            if (entry.is_regular_file() && IsImageFile(entry.path()))
+            WIN32_FIND_DATAW fd;
+            std::wstring mask = p + L"\\*.*";
+            HANDLE hFind = FindFirstFileW(mask.c_str(), &fd);
+            if (hFind != INVALID_HANDLE_VALUE)
             {
-                g_images.push_back(entry.path().wstring());
+                do
+                {
+                    if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+                    {
+                        std::wstring file = p + L"\\" + fd.cFileName;
+                        if (IsImageFile(file))
+                            g_images.push_back(file);
+                    }
+                } while (FindNextFileW(hFind, &fd));
+                FindClose(hFind);
             }
+        }
+        else if (IsImageFile(p))
+        {
+            g_images.push_back(p);
         }
     }
 
     if (!g_images.empty())
-        g_status = L"Loaded: " + std::to_wstring(g_images.size()) + L" images";
-    else
-        g_status = L"No images found";
+    {
+        g_currentIndex = 0;
+        g_status = L"Loaded " + std::to_wstring(g_images.size()) + L" images";
+    }
 }
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -61,121 +73,90 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     switch (msg)
     {
     case WM_CREATE:
-    {
         DragAcceptFiles(hWnd, TRUE);
-        HBRUSH brush = CreateSolidBrush(RGB(30, 30, 30));
-        SetClassLongPtr(hWnd, GCLP_HBRBACKGROUND, (LONG_PTR)brush);
+        SetClassLongPtr(hWnd, GCLP_HBRBACKGROUND,
+            (LONG_PTR)CreateSolidBrush(RGB(30, 30, 30)));
         return 0;
-    }
 
     case WM_DROPFILES:
-    {
-        HDROP hDrop = (HDROP)wParam;
-        wchar_t path[MAX_PATH];
+        g_images.clear();
+        g_currentIndex = -1;
+        AddImagesFromDrop((HDROP)wParam);
+        DragFinish((HDROP)wParam);
+        InvalidateRect(hWnd, nullptr, TRUE);
+        return 0;
 
-        if (DragQueryFile(hDrop, 0, path, MAX_PATH))
+    case WM_KEYDOWN:
+        if (!g_images.empty())
         {
-            LoadImagesFromPath(path);
+            if (wParam == VK_RIGHT && g_currentIndex < (int)g_images.size() - 1)
+                g_currentIndex++;
+            if (wParam == VK_LEFT && g_currentIndex > 0)
+                g_currentIndex--;
             InvalidateRect(hWnd, nullptr, TRUE);
         }
-
-        DragFinish(hDrop);
         return 0;
-    }
 
     case WM_PAINT:
     {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
-
         RECT rc;
         GetClientRect(hWnd, &rc);
 
-        Graphics graphics(hdc);
-        graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+        Graphics g(hdc);
+        g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
 
-        if (!g_images.empty())
+        if (g_currentIndex >= 0)
         {
-            Image image(g_images[0].c_str());
-
-            if (image.GetLastStatus() == Ok)
+            Image img(g_images[g_currentIndex].c_str());
+            if (img.GetLastStatus() == Ok)
             {
-                int imgW = image.GetWidth();
-                int imgH = image.GetHeight();
-
                 float scale = min(
-                    (float)rc.right / imgW,
-                    (float)(rc.bottom - 40) / imgH
+                    (float)rc.right / img.GetWidth(),
+                    (float)(rc.bottom - 60) / img.GetHeight()
                 );
 
-                int drawW = (int)(imgW * scale);
-                int drawH = (int)(imgH * scale);
+                int w = (int)(img.GetWidth() * scale);
+                int h = (int)(img.GetHeight() * scale);
+                int x = (rc.right - w) / 2;
+                int y = (rc.bottom - h) / 2 - 20;
 
-                int x = (rc.right - drawW) / 2;
-                int y = (rc.bottom - drawH) / 2 - 10;
-
-                graphics.DrawImage(&image, x, y, drawW, drawH);
+                g.DrawImage(&img, x, y, w, h);
             }
         }
         else
         {
-            SetBkMode(hdc, TRANSPARENT);
             SetTextColor(hdc, RGB(220, 220, 220));
-
-            HFONT hFont = CreateFontW(
-                28, 0, 0, 0, FW_SEMIBOLD,
-                FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET,
-                OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY,
-                VARIABLE_PITCH,
-                L"Segoe UI"
-            );
-
-            HFONT oldFont = (HFONT)SelectObject(hdc, hFont);
-
+            SetBkMode(hdc, TRANSPARENT);
             DrawTextW(
                 hdc,
-                L"Drop images or a folder here",
+                L"Drop images or folder here",
                 -1,
                 &rc,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE
+                DT_CENTER | DT_VCENTER
             );
-
-            SelectObject(hdc, oldFont);
-            DeleteObject(hFont);
         }
 
         RECT statusRc = rc;
-        statusRc.top = rc.bottom - 35;
+        statusRc.top = rc.bottom - 40;
+
+        std::wstring info;
+        if (g_currentIndex >= 0)
+        {
+            info =
+                L"Image " +
+                std::to_wstring(g_currentIndex + 1) +
+                L" / " +
+                std::to_wstring(g_images.size());
+        }
+        else
+        {
+            info = g_status;
+        }
 
         SetTextColor(hdc, RGB(180, 180, 180));
-
-        HFONT hStatusFont = CreateFontW(
-            16, 0, 0, 0, FW_NORMAL,
-            FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,
-            VARIABLE_PITCH,
-            L"Segoe UI"
-        );
-
-        HFONT oldStatusFont = (HFONT)SelectObject(hdc, hStatusFont);
-
-        std::wstring statusText = L"Status: " + g_status;
-        DrawTextW(
-            hdc,
-            statusText.c_str(),
-            -1,
-            &statusRc,
-            DT_LEFT | DT_VCENTER
-        );
-
-        SelectObject(hdc, oldStatusFont);
-        DeleteObject(hStatusFont);
+        DrawTextW(hdc, info.c_str(), -1, &statusRc, DT_LEFT | DT_VCENTER);
 
         EndPaint(hWnd, &ps);
         return 0;
@@ -186,35 +167,29 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
     }
 
-    return DefWindowProc(hWnd, msg, wParam, lParam);
+    return DefWindowProcW(hWnd, msg, wParam, lParam);
 }
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow)
+int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow)
 {
-    GdiplusStartupInput gdiplusStartupInput;
-    GdiplusStartup(&g_gdiplusToken, &gdiplusStartupInput, nullptr);
+    GdiplusStartupInput gd;
+    GdiplusStartup(&g_gdiplusToken, &gd, nullptr);
 
-    WNDCLASS wc{};
+    WNDCLASSW wc{};
     wc.lpfnWndProc = WndProc;
-    wc.hInstance = hInstance;
+    wc.hInstance = hInst;
     wc.lpszClassName = WINDOW_CLASS;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    RegisterClassW(&wc);
 
-    RegisterClass(&wc);
-
-    HWND hWnd = CreateWindowExW(
-        0,
+    HWND hWnd = CreateWindowW(
         WINDOW_CLASS,
         WINDOW_TITLE,
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
-        900,
-        600,
-        nullptr,
-        nullptr,
-        hInstance,
-        nullptr
+        CW_USEDEFAULT, CW_USEDEFAULT,
+        900, 600,
+        nullptr, nullptr,
+        hInst, nullptr
     );
 
     ShowWindow(hWnd, nCmdShow);
