@@ -2,9 +2,9 @@
 #include <windowsx.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <gdiplus.h>
 #include <string>
 #include <vector>
-#include <gdiplus.h>
 #include <algorithm>
 #include <memory>
 
@@ -13,115 +13,64 @@
 
 using namespace Gdiplus;
 
-// ================== Layout ==================
-constexpr int TOOLBAR_H = 62;
-constexpr int FOOTER_H = 42;
-
-constexpr int GRID_PADDING = 16;
-constexpr int CELL_SIZE = 140;
-constexpr int CELL_GAP = 16;
-
-constexpr int BTN_W = 140;
-constexpr int BTN_H = 34;
-
-constexpr int NAV_BTN_W = 160;
-constexpr int NAV_BTN_H = 34;
-
-// ================== App ==================
 constexpr wchar_t WINDOW_CLASS[] = L"MangaDenoiserWindow";
 constexpr wchar_t WINDOW_TITLE[] = L"Manga Denoiser";
 
+constexpr int TOOLBAR_H = 56;
+constexpr int FOOTER_H = 40;
+
+constexpr int PAD = 16;
+constexpr int CELL = 140;
+constexpr int GAP = 16;
+
+constexpr int BTN_W = 148;
+constexpr int BTN_H = 32;
+
 constexpr UINT_PTR TIMER_SCROLL = 1;
 constexpr UINT_PTR TIMER_PROCESS = 2;
-constexpr UINT_PTR TIMER_ANIM = 3;
+constexpr UINT_PTR TIMER_DONE_ANIM = 3;
 
-// ================== Theme ==================
-static const Color C_BG(255, 20, 20, 20);
-static const Color C_PANEL(255, 30, 30, 30);
-static const Color C_TEXT(255, 220, 220, 220);
-static const Color C_MUTED(255, 160, 160, 160);
+struct RectI { int x, y, w, h; };
 
-// accent (pink) – minimal but present
-static const Color C_ACCENT(255, 255, 105, 180); // hot pink
-static const Color C_ACCENT_SOFT(120, 255, 105, 180);
+static inline bool PtIn(const RectI& r, int px, int py) { return px >= r.x && px < (r.x + r.w) && py >= r.y && py < (r.y + r.h); }
+static inline int ClampI(int v, int a, int b) { return (v < a) ? a : (v > b) ? b : v; }
 
-// ================== State ==================
-enum class AppScreen { Gallery, Processing, Done };
+enum class Screen { Gallery, Processing, Done };
 
 ULONG_PTR g_gdiplusToken = 0;
 
-AppScreen g_screen = AppScreen::Gallery;
+Screen g_screen = Screen::Gallery;
 
-std::vector<std::wstring> g_images;     // full paths
-std::vector<std::unique_ptr<Bitmap>> g_thumbs; // lazy cache: nullptr until built
+std::vector<std::wstring> g_images;
+std::vector<std::unique_ptr<Bitmap>> g_thumbs;
+
 std::wstring g_inputFolder;
 std::wstring g_outputFolder;
 
 std::wstring g_status = L"Ready";
 
-int g_selected = -1;
-
-// smooth scroll
 int g_scrollY = 0;
 int g_scrollTarget = 0;
 int g_scrollMax = 0;
-bool g_scrollTimerOn = false;
 
-// processing (fake)
 bool g_processing = false;
 int  g_processed = 0;
 
-// done animation
-int  g_animTick = 0;
-bool g_animOn = false;
+int g_doneTick = 0;
 
-// double buffer
-HDC g_memDC = nullptr;
-HBITMAP g_memBmp = nullptr;
-HBITMAP g_memOld = nullptr;
-int g_memW = 0, g_memH = 0;
+static Color C_BG(255, 24, 24, 24);
+static Color C_PANEL(255, 32, 32, 32);
+static Color C_BTN(255, 55, 55, 55);
+static Color C_BTN_DIS(255, 40, 40, 40);
+static Color C_BORDER(255, 90, 90, 90);
+static Color C_TEXT(255, 220, 220, 220);
+static Color C_SUB(255, 170, 170, 170);
+static Color C_ACC(255, 255, 120, 205);
 
-// ================== Helpers ==================
-static void EnsureBackBuffer(HDC refDC, int w, int h)
+static void ResetThumbs(size_t n)
 {
-    if (w <= 0 || h <= 0) return;
-
-    if (g_memDC && (w == g_memW && h == g_memH))
-        return;
-
-    if (!g_memDC)
-    {
-        g_memDC = CreateCompatibleDC(refDC);
-    }
-
-    if (g_memBmp)
-    {
-        SelectObject(g_memDC, g_memOld);
-        DeleteObject(g_memBmp);
-        g_memBmp = nullptr;
-        g_memOld = nullptr;
-    }
-
-    g_memBmp = CreateCompatibleBitmap(refDC, w, h);
-    g_memOld = (HBITMAP)SelectObject(g_memDC, g_memBmp);
-    g_memW = w; g_memH = h;
-}
-
-static void ReleaseBackBuffer()
-{
-    if (g_memDC)
-    {
-        if (g_memBmp)
-        {
-            SelectObject(g_memDC, g_memOld);
-            DeleteObject(g_memBmp);
-            g_memBmp = nullptr;
-            g_memOld = nullptr;
-        }
-        DeleteDC(g_memDC);
-        g_memDC = nullptr;
-    }
-    g_memW = g_memH = 0;
+    g_thumbs.clear();
+    g_thumbs.resize(n);
 }
 
 static bool IsImageFile(const std::wstring& p)
@@ -133,384 +82,351 @@ static bool IsImageFile(const std::wstring& p)
     return ext == L"png" || ext == L"jpg" || ext == L"jpeg" || ext == L"bmp" || ext == L"webp";
 }
 
-static void ClearImages()
-{
-    g_images.clear();
-    g_thumbs.clear();
-    g_selected = -1;
-    g_scrollY = g_scrollTarget = 0;
-    g_scrollMax = 0;
-}
-
-static void AddImagesFromFolder(const std::wstring& folder)
+static void AddImagesFromFolder(const std::wstring& folder, std::vector<std::wstring>& out)
 {
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW((folder + L"\\*.*").c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return;
 
-    do {
+    do
+    {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         std::wstring f = folder + L"\\" + fd.cFileName;
-        if (IsImageFile(f))
-            g_images.push_back(f);
+        if (IsImageFile(f)) out.push_back(f);
     } while (FindNextFileW(h, &fd));
 
     FindClose(h);
 }
 
-static void EnsureThumbsSize()
-{
-    g_thumbs.clear();
-    g_thumbs.resize(g_images.size());
-}
-
-static std::unique_ptr<Bitmap> MakeThumb(const std::wstring& path)
-{
-    // lazy thumb build – keeps scroll smooth after first pass
-    std::unique_ptr<Image> img(new Image(path.c_str()));
-    if (img->GetLastStatus() != Ok) return nullptr;
-
-    const int S = CELL_SIZE;
-    std::unique_ptr<Bitmap> thumb(new Bitmap(S, S, PixelFormat32bppARGB));
-
-    Graphics g(thumb.get());
-    g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-    g.SetSmoothingMode(SmoothingModeHighQuality);
-
-    // background
-    SolidBrush bg(Color(255, 26, 26, 26));
-    g.FillRectangle(&bg, 0, 0, S, S);
-
-    const int iw = (int)img->GetWidth();
-    const int ih = (int)img->GetHeight();
-    if (iw <= 0 || ih <= 0) return nullptr;
-
-    float scale = min((float)(S - 8) / iw, (float)(S - 8) / ih);
-    int w = (int)(iw * scale);
-    int h = (int)(ih * scale);
-    int x = (S - w) / 2;
-    int y = (S - h) / 2;
-
-    g.DrawImage(img.get(), x, y, w, h);
-
-    // subtle border
-    Pen br(Color(255, 60, 60, 60), 1.f);
-    g.DrawRectangle(&br, 0, 0, S - 1, S - 1);
-
-    return thumb;
-}
-
-static std::wstring GetDesktopPath()
-{
-    PWSTR p = nullptr;
-    std::wstring out;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &p)))
-    {
-        out = p;
-        CoTaskMemFree(p);
-    }
-    return out;
-}
-
-static bool PickFolderDialog(HWND hWnd, const wchar_t* title, std::wstring& outFolder)
+static std::wstring PickFolderDialog(HWND hWnd, const wchar_t* title)
 {
     BROWSEINFOW bi{};
-    wchar_t path[MAX_PATH]{};
-
     bi.hwndOwner = hWnd;
-    bi.pszDisplayName = path;
     bi.lpszTitle = title;
     bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
 
     PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
-    if (!pidl) return false;
+    if (!pidl) return L"";
 
-    bool ok = SHGetPathFromIDListW(pidl, path) != FALSE;
+    wchar_t path[MAX_PATH]{};
+    if (!SHGetPathFromIDListW(pidl, path))
+    {
+        CoTaskMemFree(pidl);
+        return L"";
+    }
+
     CoTaskMemFree(pidl);
-    if (!ok) return false;
-
-    outFolder = path;
-    return true;
+    return path;
 }
 
-// ================== Layout math ==================
 static int ComputeCols(int clientW)
 {
-    int usable = clientW - GRID_PADDING * 2;
-    int step = CELL_SIZE + CELL_GAP;
+    int usable = clientW - PAD * 2;
+    int step = CELL + GAP;
     return max(1, usable / step);
 }
 
-static int ComputeContentH(int cols)
+static int ComputeContentHeight(int cols)
 {
-    if (g_images.empty()) return GRID_PADDING * 2;
+    if (g_images.empty()) return PAD * 2;
     int rows = (int)((g_images.size() + cols - 1) / cols);
-    return GRID_PADDING * 2 + rows * (CELL_SIZE + CELL_GAP);
+    int h = PAD * 2 + rows * (CELL + GAP) - GAP;
+    return max(h, PAD * 2);
 }
 
-static int Clamp(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
-
-static void StartScrollTimer(HWND hWnd)
+static void ResetGalleryAfterLoad()
 {
-    if (!g_scrollTimerOn)
-    {
-        g_scrollTimerOn = true;
-        SetTimer(hWnd, TIMER_SCROLL, 16, nullptr);
-    }
+    g_scrollY = 0;
+    g_scrollTarget = 0;
+    g_scrollMax = 0;
 }
 
-static void StopScrollTimer(HWND hWnd)
+static std::unique_ptr<Bitmap> BuildThumb(const std::wstring& path)
 {
-    if (g_scrollTimerOn)
-    {
-        g_scrollTimerOn = false;
-        KillTimer(hWnd, TIMER_SCROLL);
-    }
+    std::unique_ptr<Bitmap> src(new Bitmap(path.c_str()));
+    if (!src || src->GetLastStatus() != Ok) return nullptr;
+
+    std::unique_ptr<Bitmap> thumb(new Bitmap(CELL, CELL, PixelFormat32bppARGB));
+    if (!thumb || thumb->GetLastStatus() != Ok) return nullptr;
+
+    Graphics gg(thumb.get());
+    gg.SetSmoothingMode(SmoothingModeHighQuality);
+    gg.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+    gg.Clear(Color(255, 18, 18, 18));
+
+    const int iw = (int)src->GetWidth();
+    const int ih = (int)src->GetHeight();
+    if (iw <= 0 || ih <= 0) return thumb;
+
+    float s = min((float)CELL / (float)iw, (float)CELL / (float)ih);
+    int dw = (int)(iw * s);
+    int dh = (int)(ih * s);
+    int dx = (CELL - dw) / 2;
+    int dy = (CELL - dh) / 2;
+
+    Rect dst(dx, dy, dw, dh);
+    gg.DrawImage(src.get(), dst, 0, 0, iw, ih, UnitPixel);
+
+    Pen p(Color(255, 45, 45, 45), 1.0f);
+    gg.DrawRectangle(&p, Rect(0, 0, CELL - 1, CELL - 1));
+
+    return thumb;
 }
 
-static void StartAnimTimer(HWND hWnd)
+static void EnsureThumb(size_t i)
 {
-    if (!g_animOn)
-    {
-        g_animOn = true;
-        SetTimer(hWnd, TIMER_ANIM, 33, nullptr);
-    }
+    if (i >= g_thumbs.size()) return;
+    if (g_thumbs[i]) return;
+    g_thumbs[i] = BuildThumb(g_images[i]);
 }
 
-static void StopAnimTimer(HWND hWnd)
+static std::wstring EllipsizePath(const std::wstring& s, int maxChars)
 {
-    if (g_animOn)
-    {
-        g_animOn = false;
-        KillTimer(hWnd, TIMER_ANIM);
-    }
+    if ((int)s.size() <= maxChars) return s;
+    if (maxChars < 10) return s.substr(0, maxChars);
+    int keepL = maxChars / 2 - 2;
+    int keepR = maxChars - keepL - 3;
+    return s.substr(0, keepL) + L"..." + s.substr((int)s.size() - keepR);
 }
 
-// ================== Hit testing ==================
-static bool HitRect(int x, int y, int rx, int ry, int rw, int rh)
-{
-    return x >= rx && x <= rx + rw && y >= ry && y <= ry + rh;
-}
-
-static int HitGridIndex(const RECT& rc, int mx, int my)
-{
-    int top = TOOLBAR_H;
-    int bottom = rc.bottom - FOOTER_H;
-    if (my < top || my > bottom) return -1;
-
-    int cols = ComputeCols(rc.right);
-    int localX = mx - GRID_PADDING;
-    int localY = (my - top) + g_scrollY - GRID_PADDING;
-    if (localX < 0 || localY < 0) return -1;
-
-    int step = CELL_SIZE + CELL_GAP;
-    int col = localX / step;
-    int row = localY / step;
-
-    if (col < 0 || col >= cols) return -1;
-
-    int xIn = localX % step;
-    int yIn = localY % step;
-    if (xIn > CELL_SIZE || yIn > CELL_SIZE) return -1;
-
-    int idx = row * cols + col;
-    if (idx < 0 || idx >= (int)g_images.size()) return -1;
-    return idx;
-}
-
-// ================== Drawing ==================
-static void DrawTextEllipsis(Graphics& g, const wchar_t* text, const RectF& r, const Color& c, float size, bool bold = false)
+static void DrawTextG(Graphics& g, const std::wstring& text, float x, float y, float w, float h, float size, Color color, bool bold, int align)
 {
     FontFamily ff(L"Segoe UI");
     Font f(&ff, size, bold ? FontStyleBold : FontStyleRegular, UnitPixel);
-    SolidBrush br(c);
+    SolidBrush b(color);
 
+    RectF r(x, y, w, h);
     StringFormat sf;
-    sf.SetTrimming(StringTrimmingEllipsisCharacter);
-    sf.SetFormatFlags(StringFormatFlagsNoWrap);
     sf.SetLineAlignment(StringAlignmentCenter);
+    if (align < 0) sf.SetAlignment(StringAlignmentNear);
+    else if (align > 0) sf.SetAlignment(StringAlignmentFar);
+    else sf.SetAlignment(StringAlignmentCenter);
 
-    g.DrawString(text, -1, &f, r, &sf, &br);
+    g.DrawString(text.c_str(), -1, &f, r, &sf, &b);
 }
 
-static void DrawButton(Graphics& g, int x, int y, int w, int h, const wchar_t* text, bool disabled, bool accentBorder)
+static void BuildRoundRectPath(GraphicsPath& path, const RectF& r, REAL radius)
 {
-    Color bg = disabled ? Color(255, 38, 38, 38) : Color(255, 50, 50, 50);
-    Color br = accentBorder ? C_ACCENT : Color(255, 85, 85, 85);
-    Color tx = disabled ? Color(255, 120, 120, 120) : C_TEXT;
+    REAL rr = radius;
+    if (rr < 0) rr = 0;
+    REAL maxR = min(r.Width, r.Height) / 2.0f;
+    if (rr > maxR) rr = maxR;
 
-    SolidBrush b(bg);
-    Pen p(br, accentBorder ? 2.f : 1.f);
+    REAL d = rr * 2.0f;
+    REAL x = r.X;
+    REAL y = r.Y;
+    REAL w = r.Width;
+    REAL h = r.Height;
 
-    g.FillRectangle(&b, x, y, w, h);
-    g.DrawRectangle(&p, x, y, w, h);
-
-    FontFamily ff(L"Segoe UI");
-    Font f(&ff, 14.f, FontStyleRegular, UnitPixel);
-    SolidBrush tb(tx);
-
-    RectF r((REAL)x, (REAL)y, (REAL)w, (REAL)h);
-    StringFormat sf;
-    sf.SetAlignment(StringAlignmentCenter);
-    sf.SetLineAlignment(StringAlignmentCenter);
-    g.DrawString(text, -1, &f, r, &sf, &tb);
-}
-
-static void DrawTopAccentLine(Graphics& g, int w)
-{
-    Pen p(C_ACCENT_SOFT, 2.f);
-    g.DrawLine(&p, 0.f, (REAL)TOOLBAR_H - 1.f, (REAL)w, (REAL)TOOLBAR_H - 1.f);
-}
-
-static void DrawCenteredHint(Graphics& g, const RECT& rc, const wchar_t* text)
-{
-    RectF r(0.f, (REAL)TOOLBAR_H, (REAL)rc.right, (REAL)(rc.bottom - TOOLBAR_H - FOOTER_H));
-    FontFamily ff(L"Segoe UI");
-    Font f(&ff, 20.f, FontStyleBold, UnitPixel);
-    SolidBrush br(C_TEXT);
-    StringFormat sf;
-    sf.SetAlignment(StringAlignmentCenter);
-    sf.SetLineAlignment(StringAlignmentCenter);
-    g.DrawString(text, -1, &f, r, &sf, &br);
-}
-
-static void DrawProgressBar(Graphics& g, int x, int y, int w, int h, float t01)
-{
-    t01 = max(0.f, min(1.f, t01));
-
-    SolidBrush bg(Color(255, 40, 40, 40));
-    g.FillRectangle(&bg, x, y, w, h);
-
-    int fill = (int)(w * t01);
-    SolidBrush fillBr(C_ACCENT);
-    g.FillRectangle(&fillBr, x, y, fill, h);
-
-    Pen br(Color(255, 80, 80, 80), 1.f);
-    g.DrawRectangle(&br, x, y, w, h);
-}
-
-static void DrawCuteCat(Graphics& g, int cx, int cy, int tick)
-{
-    // Very simple vector cat with subtle animation (tail + blush pulse)
-    g.SetSmoothingMode(SmoothingModeHighQuality);
-
-    float pulse = 0.5f + 0.5f * sinf(tick * 0.08f);
-    int blushA = (int)(80 + 80 * pulse);
-
-    // body
-    SolidBrush body(Color(255, 50, 50, 55));
-    g.FillEllipse(&body, cx - 90, cy - 60, 180, 130);
-
-    // ears
-    SolidBrush ear(Color(255, 55, 55, 60));
-    Point ear1[3] = { Point(cx - 65, cy - 45), Point(cx - 95, cy - 105), Point(cx - 30, cy - 70) };
-    Point ear2[3] = { Point(cx + 65, cy - 45), Point(cx + 95, cy - 105), Point(cx + 30, cy - 70) };
-    g.FillPolygon(&ear, ear1, 3);
-    g.FillPolygon(&ear, ear2, 3);
-
-    // accent outline
-    Pen outline(C_ACCENT_SOFT, 3.f);
-    g.DrawEllipse(&outline, cx - 92, cy - 62, 184, 134);
-
-    // face (eyes)
-    Pen eye(Color(255, 230, 230, 230), 4.f);
-    g.DrawLine(&eye, cx - 40, cy - 10, cx - 20, cy - 10);
-    g.DrawLine(&eye, cx + 20, cy - 10, cx + 40, cy - 10);
-
-    // mouth
-    Pen mouth(Color(255, 230, 230, 230), 3.f);
-    g.DrawArc(&mouth, cx - 12, cy + 2, 24, 18, 20, 140);
-
-    // blush
-    SolidBrush blush(Color(blushA, 255, 105, 180));
-    g.FillEllipse(&blush, cx - 62, cy + 2, 22, 12);
-    g.FillEllipse(&blush, cx + 40, cy + 2, 22, 12);
-
-    // tail animation (swing)
-    float a = sinf(tick * 0.07f) * 18.f;
-    Pen tail(Color(200, 255, 105, 180), 10.f);
-    tail.SetStartCap(LineCapRound);
-    tail.SetEndCap(LineCapRound);
-    g.DrawArc(&tail, cx + 65, cy + 10, 120, 90, 220 + a, 80);
-
-    // little heart
-    SolidBrush heart(C_ACCENT);
-    g.FillEllipse(&heart, cx + 90, cy - 95, 12, 12);
-    g.FillEllipse(&heart, cx + 102, cy - 95, 12, 12);
-    Point tri[3] = { Point(cx + 90, cy - 89), Point(cx + 114, cy - 89), Point(cx + 102, cy - 74) };
-    g.FillPolygon(&heart, tri, 3);
-}
-
-// ================== Screen transitions ==================
-static void GoToGallery(HWND hWnd)
-{
-    g_screen = AppScreen::Gallery;
-    g_processing = false;
-    g_processed = 0;
-    KillTimer(hWnd, TIMER_PROCESS);
-    StopAnimTimer(hWnd);
-
-    g_status = L"Ready";
-    InvalidateRect(hWnd, nullptr, TRUE);
-}
-
-static void GoToProcessing(HWND hWnd)
-{
-    if (g_images.empty()) { g_status = L"No images to process"; InvalidateRect(hWnd, nullptr, TRUE); return; }
-
-    g_screen = AppScreen::Processing;
-    StopAnimTimer(hWnd);
-
-    // default output folder if empty
-    if (g_outputFolder.empty())
+    if (rr <= 0.0f)
     {
-        std::wstring desk = GetDesktopPath();
-        g_outputFolder = desk.empty() ? L"" : (desk + L"\\MangaDenoiser_Output");
+        path.AddRectangle(r);
+        path.CloseFigure();
+        return;
     }
+
+    path.AddArc(x, y, d, d, 180.0f, 90.0f);
+    path.AddArc(x + w - d, y, d, d, 270.0f, 90.0f);
+    path.AddArc(x + w - d, y + h - d, d, d, 0.0f, 90.0f);
+    path.AddArc(x, y + h - d, d, d, 90.0f, 90.0f);
+    path.CloseFigure();
+}
+
+static void FillRoundedRect(Graphics& g, Brush& brush, const RectF& r, REAL radius)
+{
+    GraphicsPath path;
+    BuildRoundRectPath(path, r, radius);
+    g.FillPath(&brush, &path);
+}
+
+static void DrawRoundedRect(Graphics& g, Pen& pen, const RectF& r, REAL radius)
+{
+    GraphicsPath path;
+    BuildRoundRectPath(path, r, radius);
+    g.DrawPath(&pen, &path);
+}
+
+static void DrawButton(Graphics& g, const RectI& r, const wchar_t* text, bool disabled)
+{
+    SolidBrush bg(disabled ? C_BTN_DIS : C_BTN);
+    Pen br(C_BORDER, 1.0f);
+
+    g.FillRectangle(&bg, r.x, r.y, r.w, r.h);
+    g.DrawRectangle(&br, r.x, r.y, r.w, r.h);
+
+    if (!disabled)
+    {
+        Pen acc(C_ACC, 2.0f);
+        g.DrawLine(&acc, r.x + 2, r.y + r.h - 1, r.x + r.w - 2, r.y + r.h - 1);
+    }
+
+    DrawTextG(g, text, (float)r.x, (float)r.y, (float)r.w, (float)r.h, 14.0f, disabled ? Color(255, 130, 130, 130) : C_TEXT, false, 0);
+}
+
+static void DrawPanelOutline(Graphics& g, int w, int h)
+{
+    Pen acc(C_ACC, 2.0f);
+    g.DrawRectangle(&acc, 1, 1, w - 3, h - 3);
+}
+
+static void ComputeScroll(const RECT& rc)
+{
+    if (g_screen != Screen::Gallery)
+    {
+        g_scrollY = 0;
+        g_scrollTarget = 0;
+        g_scrollMax = 0;
+        return;
+    }
+
+    int viewH = (rc.bottom - rc.top) - TOOLBAR_H - FOOTER_H;
+    int cols = ComputeCols(rc.right);
+    int contentH = ComputeContentHeight(cols);
+
+    g_scrollMax = max(0, contentH - viewH);
+    g_scrollTarget = ClampI(g_scrollTarget, 0, g_scrollMax);
+    g_scrollY = ClampI(g_scrollY, 0, g_scrollMax);
+}
+
+static void StartProcessing(HWND hWnd)
+{
+    if (g_images.empty()) return;
+    if (g_outputFolder.empty()) return;
 
     g_processing = true;
     g_processed = 0;
-    g_status = L"Processing (stub)";
-
+    g_status = L"Processing...";
+    KillTimer(hWnd, TIMER_PROCESS);
     SetTimer(hWnd, TIMER_PROCESS, 25, nullptr);
-    InvalidateRect(hWnd, nullptr, TRUE);
 }
 
-static void GoToDone(HWND hWnd)
+static void StopProcessing(HWND hWnd)
 {
-    g_screen = AppScreen::Done;
     g_processing = false;
-    g_status = L"Done";
-    StartAnimTimer(hWnd);
-    InvalidateRect(hWnd, nullptr, TRUE);
+    KillTimer(hWnd, TIMER_PROCESS);
 }
 
-// ================== Main WndProc ==================
+static void SwitchToDone(HWND hWnd)
+{
+    g_screen = Screen::Done;
+    g_doneTick = 0;
+    g_status = L"Done";
+    KillTimer(hWnd, TIMER_DONE_ANIM);
+    SetTimer(hWnd, TIMER_DONE_ANIM, 50, nullptr);
+}
+
+static void DrawCat(Graphics& g, int cx, int cy, int t)
+{
+    int sway = (t % 20) - 10;
+
+    SolidBrush body(Color(255, 50, 50, 50));
+    SolidBrush face(Color(255, 60, 60, 60));
+    SolidBrush eye(Color(255, 230, 230, 230));
+    SolidBrush blush(C_ACC);
+
+    Pen outline(Color(255, 90, 90, 90), 2.0f);
+    Pen whisk(C_SUB, 2.0f);
+    Pen acc(C_ACC, 2.0f);
+
+    int bw = 210;
+    int bh = 150;
+
+    Rect bodyR(cx - bw / 2, cy - bh / 2 + 50, bw, bh);
+    FillRoundedRect(g, body, RectF((REAL)bodyR.X, (REAL)bodyR.Y, (REAL)bodyR.Width, (REAL)bodyR.Height), 22.0f);
+
+    Rect headR(cx - 120, cy - 120, 240, 200);
+    FillRoundedRect(g, face, RectF((REAL)headR.X, (REAL)headR.Y, (REAL)headR.Width, (REAL)headR.Height), 36.0f);
+    DrawRoundedRect(g, outline, RectF((REAL)headR.X, (REAL)headR.Y, (REAL)headR.Width, (REAL)headR.Height), 36.0f);
+
+    Point earL[3] = { Point(cx - 85, cy - 120), Point(cx - 130, cy - 170), Point(cx - 40, cy - 150) };
+    Point earR[3] = { Point(cx + 85, cy - 120), Point(cx + 130, cy - 170), Point(cx + 40, cy - 150) };
+    g.FillPolygon(&face, earL, 3);
+    g.FillPolygon(&face, earR, 3);
+    g.DrawPolygon(&outline, earL, 3);
+    g.DrawPolygon(&outline, earR, 3);
+
+    g.FillEllipse(&eye, cx - 55, cy - 40, 22, 22);
+    g.FillEllipse(&eye, cx + 33, cy - 40, 22, 22);
+
+    g.FillEllipse(&blush, cx - 85, cy - 10, 26, 14);
+    g.FillEllipse(&blush, cx + 59, cy - 10, 26, 14);
+
+    g.DrawLine(&outline, cx, cy - 10, cx, cy + 12);
+    g.DrawArc(&outline, cx - 18, cy + 6, 18, 14, 0, 180);
+    g.DrawArc(&outline, cx, cy + 6, 18, 14, 0, 180);
+
+    g.DrawLine(&whisk, cx - 45, cy - 10, cx - 120, cy - 25);
+    g.DrawLine(&whisk, cx - 45, cy, cx - 120, cy);
+    g.DrawLine(&whisk, cx - 45, cy + 10, cx - 120, cy + 25);
+
+    g.DrawLine(&whisk, cx + 45, cy - 10, cx + 120, cy - 25);
+    g.DrawLine(&whisk, cx + 45, cy, cx + 120, cy);
+    g.DrawLine(&whisk, cx + 45, cy + 10, cx + 120, cy + 25);
+
+    int tailX = cx + bw / 2 - 10;
+    int tailY = cy + 90;
+    int tailW = 90;
+    int tailH = 30;
+
+    float phase = (float)(t % 100) / 100.0f;
+    float s = sinf(phase * 6.2831853f);          
+    float a = s * 18.0f;                         
+
+    PointF p0((REAL)(cx + bw / 2 - 18), (REAL)(cy + 90));        
+    PointF p3((REAL)(cx + bw / 2 + 55), (REAL)(cy + 70));        
+    p3.X += a;                                                   
+    p3.Y += (-fabsf(s) * 6.0f);                                 
+
+    PointF c1(p0.X + 25.0f, p0.Y - 5.0f);                        
+    PointF c2(p3.X - 25.0f, p3.Y + 10.0f);                      
+    c2.Y += s * 8.0f;                                            
+
+    GraphicsPath tail;
+    tail.AddBezier(p0, c1, c2, p3);
+    g.DrawPath(&acc, &tail);
+}
+
+static void LoadImagesFromPaths(const std::vector<std::wstring>& collected, const std::wstring& inferredFolder)
+{
+    g_images = collected;
+    std::sort(g_images.begin(), g_images.end());
+    ResetThumbs(g_images.size());
+
+    g_inputFolder = inferredFolder;
+    ResetGalleryAfterLoad();
+    g_screen = Screen::Gallery;
+    g_processing = false;
+    g_processed = 0;
+    g_status = g_images.empty() ? L"No images found" : L"Images loaded";
+}
+
+static POINT GetClientPtFromWheel(HWND hWnd, LPARAM lParam)
+{
+    POINT p;
+    p.x = GET_X_LPARAM(lParam);
+    p.y = GET_Y_LPARAM(lParam);
+    ScreenToClient(hWnd, &p);
+    return p;
+}
+
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg)
     {
     case WM_CREATE:
         DragAcceptFiles(hWnd, TRUE);
-        return 0;
-
-    case WM_ERASEBKGND:
-        // prevent flicker (we draw entire frame ourselves)
-        return 1;
-
-    case WM_SIZE:
-        // backbuffer will be resized on next paint
-        InvalidateRect(hWnd, nullptr, TRUE);
+        SetTimer(hWnd, TIMER_SCROLL, 16, nullptr);
         return 0;
 
     case WM_DROPFILES:
     {
         HDROP hDrop = (HDROP)wParam;
-        UINT count = DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0);
-        wchar_t path[MAX_PATH];
 
-        ClearImages();
-        g_inputFolder.clear();
+        UINT count = DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0);
+        wchar_t path[MAX_PATH]{};
+
+        std::vector<std::wstring> collected;
+        std::wstring folderHint;
 
         for (UINT i = 0; i < count; i++)
         {
@@ -522,517 +438,381 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
             if (attr & FILE_ATTRIBUTE_DIRECTORY)
             {
-                // take first folder as "input folder" display, but still add all folders
-                if (g_inputFolder.empty()) g_inputFolder = p;
-                AddImagesFromFolder(p);
+                if (folderHint.empty()) folderHint = p;
+                AddImagesFromFolder(p, collected);
             }
-            else if (IsImageFile(p))
+            else
             {
-                g_images.push_back(p);
+                if (IsImageFile(p)) collected.push_back(p);
             }
-        }
-
-        EnsureThumbsSize();
-
-        if (!g_images.empty())
-        {
-            g_selected = 0;
-            g_status = L"Images loaded";
-        }
-        else
-        {
-            g_status = L"No images found";
         }
 
         DragFinish(hDrop);
+
+        if (!collected.empty())
+        {
+            if (folderHint.empty())
+            {
+                auto pos = collected[0].find_last_of(L"\\/");
+                folderHint = (pos == std::wstring::npos) ? L"" : collected[0].substr(0, pos);
+            }
+            LoadImagesFromPaths(collected, folderHint);
+        }
+        else
+        {
+            g_images.clear();
+            ResetThumbs(0);
+            g_inputFolder.clear();
+            g_status = L"No images found";
+            ResetGalleryAfterLoad();
+            g_screen = Screen::Gallery;
+        }
+
         InvalidateRect(hWnd, nullptr, TRUE);
         return 0;
     }
 
     case WM_MOUSEWHEEL:
-        if (g_screen == AppScreen::Gallery && !g_images.empty())
-        {
-            short d = GET_WHEEL_DELTA_WPARAM(wParam);
-            g_scrollTarget -= (int)(d * 0.75); // smoother, smaller steps
-            g_scrollTarget = Clamp(g_scrollTarget, 0, g_scrollMax);
-            StartScrollTimer(hWnd);
-        }
+    {
+        if (g_screen != Screen::Gallery) return 0;
+
+        RECT rc; GetClientRect(hWnd, &rc);
+        POINT pt = GetClientPtFromWheel(hWnd, lParam);
+
+        int viewTop = TOOLBAR_H;
+        int viewBottom = rc.bottom - FOOTER_H;
+
+        if (pt.y < viewTop || pt.y > viewBottom) return 0;
+
+        short delta = GET_WHEEL_DELTA_WPARAM(wParam);
+        g_scrollTarget -= (delta / 120) * 140;
+        g_scrollTarget = ClampI(g_scrollTarget, 0, g_scrollMax);
+
+        InvalidateRect(hWnd, nullptr, FALSE);
         return 0;
+    }
 
     case WM_TIMER:
         if (wParam == TIMER_SCROLL)
         {
+            RECT rc; GetClientRect(hWnd, &rc);
+            ComputeScroll(rc);
+
             int diff = g_scrollTarget - g_scrollY;
-            if (abs(diff) <= 1)
-            {
-                g_scrollY = g_scrollTarget;
-                StopScrollTimer(hWnd);
-            }
-            else
-            {
-                g_scrollY += diff / 5; // easing
-            }
+            g_scrollY += diff / 4;
+            if (abs(diff) < 2) g_scrollY = g_scrollTarget;
+            g_scrollY = ClampI(g_scrollY, 0, g_scrollMax);
+
             InvalidateRect(hWnd, nullptr, FALSE);
-            return 0;
         }
-        if (wParam == TIMER_PROCESS)
+        else if (wParam == TIMER_PROCESS)
         {
-            // fake processing: just count images
-            if (!g_processing)
-            {
-                KillTimer(hWnd, TIMER_PROCESS);
-                return 0;
-            }
+            if (!g_processing) return 0;
 
             g_processed++;
             if (g_processed >= (int)g_images.size())
             {
-                KillTimer(hWnd, TIMER_PROCESS);
-                g_processing = false;
-                GoToDone(hWnd);
-                return 0;
+                StopProcessing(hWnd);
+                SwitchToDone(hWnd);
             }
 
             InvalidateRect(hWnd, nullptr, FALSE);
-            return 0;
         }
-        if (wParam == TIMER_ANIM)
+        else if (wParam == TIMER_DONE_ANIM)
         {
-            g_animTick++;
+            g_doneTick++;
             InvalidateRect(hWnd, nullptr, FALSE);
-            return 0;
         }
         return 0;
 
     case WM_LBUTTONDOWN:
     {
-        int x = GET_X_LPARAM(lParam);
-        int y = GET_Y_LPARAM(lParam);
+        int mx = GET_X_LPARAM(lParam);
+        int my = GET_Y_LPARAM(lParam);
 
         RECT rc; GetClientRect(hWnd, &rc);
 
-        // ----- Toolbar hitboxes -----
-        int btnY = (TOOLBAR_H - BTN_H) / 2;
+        RectI btnAdd{ PAD, 12, BTN_W, BTN_H };
+        RectI btnNext{ PAD + BTN_W + 12, 12, BTN_W, BTN_H };
+        RectI btnBack{ PAD, rc.bottom - FOOTER_H + 6, 110, 28 };
 
-        // Buttons: Add Folder, Change Output (on processing), Next/Back on footer
-        if (y < TOOLBAR_H)
+        if (my < TOOLBAR_H)
         {
-            // Add folder
-            if (HitRect(x, y, 16, btnY, BTN_W, BTN_H))
+            if (PtIn(btnAdd, mx, my))
             {
-                std::wstring picked;
-                if (PickFolderDialog(hWnd, L"Select folder with images", picked))
+                std::wstring picked = PickFolderDialog(hWnd, L"Select folder with images");
+                if (!picked.empty())
                 {
-                    ClearImages();
-                    g_inputFolder = picked;
-                    AddImagesFromFolder(g_inputFolder);
-                    EnsureThumbsSize();
-
-                    if (!g_images.empty())
-                    {
-                        g_selected = 0;
-                        g_status = L"Images loaded";
-                    }
-                    else
-                    {
-                        g_status = L"No images found";
-                    }
-
-                    // reset scroll properly (and clamp)
-                    g_scrollY = g_scrollTarget = 0;
+                    std::vector<std::wstring> collected;
+                    AddImagesFromFolder(picked, collected);
+                    LoadImagesFromPaths(collected, picked);
                     InvalidateRect(hWnd, nullptr, TRUE);
                 }
                 return 0;
             }
 
-            // On Processing screen: Change output folder
-            if (g_screen == AppScreen::Processing)
+            if (PtIn(btnNext, mx, my))
             {
-                int changeX = 16 + BTN_W + 12;
-                if (HitRect(x, y, changeX, btnY, BTN_W, BTN_H))
+                if (g_screen == Screen::Gallery && !g_images.empty())
                 {
-                    std::wstring picked;
-                    if (PickFolderDialog(hWnd, L"Select output folder", picked))
-                    {
-                        g_outputFolder = picked;
-                        g_status = L"Output folder set";
-                        InvalidateRect(hWnd, nullptr, TRUE);
-                    }
+                    g_screen = Screen::Processing;
+                    g_status = L"Choose output folder";
+                    InvalidateRect(hWnd, nullptr, TRUE);
+                }
+                return 0;
+            }
+        }
+
+        if (my >= (rc.bottom - FOOTER_H))
+        {
+            if (g_screen != Screen::Gallery && PtIn(btnBack, mx, my))
+            {
+                if (g_screen == Screen::Processing) StopProcessing(hWnd);
+                g_screen = Screen::Gallery;
+                g_status = L"Ready";
+                InvalidateRect(hWnd, nullptr, TRUE);
+                return 0;
+            }
+        }
+
+        if (g_screen == Screen::Processing)
+        {
+            RectI outPick{ PAD, TOOLBAR_H + 90, 420, 38 };
+            RectI startBtn{ PAD, TOOLBAR_H + 150, 160, 36 };
+
+            if (PtIn(outPick, mx, my))
+            {
+                std::wstring picked = PickFolderDialog(hWnd, L"Select output folder");
+                if (!picked.empty())
+                {
+                    g_outputFolder = picked;
+                    g_status = L"Output folder selected";
+                    InvalidateRect(hWnd, nullptr, TRUE);
+                }
+                return 0;
+            }
+
+            bool canStart = !g_outputFolder.empty() && !g_images.empty() && !g_processing;
+            if (PtIn(startBtn, mx, my))
+            {
+                if (!canStart)
+                {
+                    g_status = g_outputFolder.empty() ? L"Select output folder first" : L"No images to process";
+                    InvalidateRect(hWnd, nullptr, TRUE);
                     return 0;
                 }
-            }
-
-            return 0;
-        }
-
-        // ----- Footer navigation -----
-        int footerTop = rc.bottom - FOOTER_H;
-        if (y >= footerTop)
-        {
-            int navY = footerTop + (FOOTER_H - NAV_BTN_H) / 2;
-
-            bool canBack = true;
-            bool canNext = true;
-
-            if (g_screen == AppScreen::Gallery)
-            {
-                canBack = false;
-                canNext = !g_images.empty();
-            }
-            else if (g_screen == AppScreen::Processing)
-            {
-                // During processing: allow Cancel only via Back? We'll make Back return to Gallery only if not processing.
-                canBack = !g_processing;
-                canNext = !g_processing && (g_processed >= (int)g_images.size());
-            }
-            else if (g_screen == AppScreen::Done)
-            {
-                canBack = true; // back to gallery
-                canNext = false;
-            }
-
-            // Back button (left)
-            if (HitRect(x, y, 16, navY, NAV_BTN_W, NAV_BTN_H))
-            {
-                if (g_screen == AppScreen::Done)
-                {
-                    GoToGallery(hWnd);
-                }
-                else if (g_screen == AppScreen::Processing && canBack)
-                {
-                    GoToGallery(hWnd);
-                }
+                StartProcessing(hWnd);
+                InvalidateRect(hWnd, nullptr, TRUE);
                 return 0;
             }
-
-            // Next button (right)
-            int nextX = rc.right - 16 - NAV_BTN_W;
-            if (HitRect(x, y, nextX, navY, NAV_BTN_W, NAV_BTN_H))
-            {
-                if (g_screen == AppScreen::Gallery && canNext)
-                {
-                    GoToProcessing(hWnd);
-                }
-                else if (g_screen == AppScreen::Processing && canNext)
-                {
-                    GoToDone(hWnd);
-                }
-                return 0;
-            }
-
-            return 0;
         }
 
-        // ----- Grid selection -----
-        if (g_screen == AppScreen::Gallery && !g_images.empty())
-        {
-            int idx = HitGridIndex(rc, x, y);
-            if (idx != -1)
-            {
-                g_selected = idx;
-                g_status = L"Selected: " + std::to_wstring(idx + 1);
-                InvalidateRect(hWnd, nullptr, FALSE);
-            }
-        }
         return 0;
     }
+
+    case WM_ERASEBKGND:
+        return 1;
 
     case WM_PAINT:
     {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
 
-        RECT rc;
-        GetClientRect(hWnd, &rc);
+        RECT rc; GetClientRect(hWnd, &rc);
 
-        EnsureBackBuffer(hdc, rc.right, rc.bottom);
+        HDC memDC = CreateCompatibleDC(hdc);
+        HBITMAP memBmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+        HGDIOBJ oldBmp = SelectObject(memDC, memBmp);
 
-        // Clear backbuffer
-        {
-            Graphics gg(g_memDC);
-            SolidBrush bg(C_BG);
-            gg.FillRectangle(&bg, 0, 0, rc.right, rc.bottom);
-        }
-
-        Graphics g(g_memDC);
-        g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+        Graphics g(memDC);
         g.SetSmoothingMode(SmoothingModeHighQuality);
+        g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+        g.Clear(C_BG);
 
-        // ===== Toolbar =====
-        SolidBrush tb(C_PANEL);
-        g.FillRectangle(&tb, 0, 0, rc.right, TOOLBAR_H);
-        DrawTopAccentLine(g, rc.right);
+        SolidBrush toolbar(C_PANEL);
+        g.FillRectangle(&toolbar, 0, 0, rc.right, TOOLBAR_H);
 
-        int btnY = (TOOLBAR_H - BTN_H) / 2;
+        Pen acc(C_ACC, 2.0f);
+        g.DrawLine(&acc, 0, TOOLBAR_H - 1, rc.right, TOOLBAR_H - 1);
 
-        // Add folder button (accent border minimal)
-        DrawButton(g, 16, btnY, BTN_W, BTN_H, L"Add folder", false, true);
+        RectI btnAdd{ PAD, 12, BTN_W, BTN_H };
+        RectI btnNext{ PAD + BTN_W + 12, 12, BTN_W, BTN_H };
 
-        // Processing screen: Change output button
-        if (g_screen == AppScreen::Processing)
+        bool nextDisabled = g_images.empty();
+        DrawButton(g, btnAdd, L"Add folder", false);
+        DrawButton(g, btnNext, L"Next", nextDisabled);
+
+        std::wstring folderLine = g_inputFolder.empty() ? L"Drop a folder/images to start" : g_inputFolder;
+        folderLine = EllipsizePath(folderLine, 110);
+
+        int pathX = PAD + (BTN_W + 12) * 2;
+        int pathW = max(0, rc.right - PAD - pathX);
+        DrawTextG(g, folderLine, (float)pathX, 0.f, (float)pathW, (float)TOOLBAR_H, 13.0f, C_SUB, false, -1);
+
+        SolidBrush footer(C_PANEL);
+        g.FillRectangle(&footer, 0, rc.bottom - FOOTER_H, rc.right, FOOTER_H);
+        g.DrawLine(&acc, 0, rc.bottom - FOOTER_H, rc.right, rc.bottom - FOOTER_H);
+
+        RectI btnBack{ PAD, rc.bottom - FOOTER_H + 6, 110, 28 };
+        bool showBack = (g_screen != Screen::Gallery);
+        if (showBack) DrawButton(g, btnBack, L"Back", false);
+
+        int statusX = PAD;
+        if (showBack) statusX = btnBack.x + btnBack.w + 24;
+
+        std::wstring footerTxt = L"Images: " + std::to_wstring(g_images.size()) + L"    Status: " + g_status;
+        DrawTextG(g, footerTxt, (float)statusX, (float)(rc.bottom - FOOTER_H), (float)(rc.right - statusX - PAD), (float)FOOTER_H, 13.0f, C_SUB, false, -1);
+
+        DrawPanelOutline(g, rc.right, rc.bottom);
+
+        if (g_screen == Screen::Gallery)
         {
-            DrawButton(g, 16 + BTN_W + 12, btnY, BTN_W, BTN_H, L"Output...", false, false);
-        }
+            int viewTop = TOOLBAR_H;
+            int viewBottom = rc.bottom - FOOTER_H;
+            int viewH = viewBottom - viewTop;
 
-        // Show input folder path (Gallery + Processing), ellipsis
-        {
-            std::wstring shown = g_inputFolder.empty() ? L"Input: (none)" : (L"Input: " + g_inputFolder);
-            RectF r((REAL)(16 + BTN_W + 12 + (g_screen == AppScreen::Processing ? (BTN_W + 12) : 0)),
-                0.f,
-                (REAL)(rc.right - 24),
-                (REAL)TOOLBAR_H);
-
-            DrawTextEllipsis(g, shown.c_str(), r, C_MUTED, 13.f, false);
-        }
-
-        // ===== Footer (ALWAYS visible) =====
-        SolidBrush fb(C_PANEL);
-        g.FillRectangle(&fb, 0, rc.bottom - FOOTER_H, rc.right, FOOTER_H);
-
-        // Accent line above footer
-        Pen fp(C_ACCENT_SOFT, 2.f);
-        g.DrawLine(&fp, 0.f, (REAL)(rc.bottom - FOOTER_H), (REAL)rc.right, (REAL)(rc.bottom - FOOTER_H));
-
-        // Footer text
-        {
-            FontFamily ff(L"Segoe UI");
-            Font font(&ff, 13.f, FontStyleRegular, UnitPixel);
-            SolidBrush tx(C_TEXT);
-
-            std::wstring left =
-                L"Images: " + std::to_wstring(g_images.size()) +
-                L"    Selected: " + std::to_wstring(g_selected >= 0 ? (g_selected + 1) : 0) +
-                L"    Status: " + g_status;
-
-            RectF fr(16.f, (REAL)(rc.bottom - FOOTER_H + 10), (REAL)(rc.right - 32), 18.f);
-            g.DrawString(left.c_str(), -1, &font, fr, nullptr, &tx);
-        }
-
-        // Footer navigation buttons (installer-like)
-        {
-            int navY = rc.bottom - FOOTER_H + (FOOTER_H - NAV_BTN_H) / 2;
-
-            bool canBack = true, canNext = true;
-            const wchar_t* backText = L"Back";
-            const wchar_t* nextText = L"Next";
-
-            if (g_screen == AppScreen::Gallery)
-            {
-                canBack = false;
-                canNext = !g_images.empty();
-            }
-            else if (g_screen == AppScreen::Processing)
-            {
-                // while processing, next disabled; back disabled
-                canBack = !g_processing;
-                canNext = !g_processing && (g_processed >= (int)g_images.size());
-                backText = g_processing ? L"Back" : L"Back";
-                nextText = g_processing ? L"Processing..." : L"Next";
-            }
-            else if (g_screen == AppScreen::Done)
-            {
-                canBack = true;
-                canNext = false;
-                backText = L"Back to Gallery";
-            }
-
-            // Back (left)
-            DrawButton(g, 16, navY, NAV_BTN_W, NAV_BTN_H, backText, !canBack, false);
-
-            // Next (right)
-            int nextX = rc.right - 16 - NAV_BTN_W;
-            DrawButton(g, nextX, navY, NAV_BTN_W, NAV_BTN_H, nextText, !canNext, true);
-        }
-
-        // ===== Screen content area =====
-        int contentTop = TOOLBAR_H;
-        int contentBottom = rc.bottom - FOOTER_H;
-        int contentH = contentBottom - contentTop;
-
-        // --- Gallery ---
-        if (g_screen == AppScreen::Gallery)
-        {
-            // compute scroll bounds
             int cols = ComputeCols(rc.right);
-            int contentTotalH = ComputeContentH(cols);
-            g_scrollMax = max(0, contentTotalH - contentH);
-            g_scrollTarget = Clamp(g_scrollTarget, 0, g_scrollMax);
-            g_scrollY = Clamp(g_scrollY, 0, g_scrollMax);
+            int contentH = ComputeContentHeight(cols);
+
+            g_scrollMax = max(0, contentH - viewH);
+            g_scrollTarget = ClampI(g_scrollTarget, 0, g_scrollMax);
+            g_scrollY = ClampI(g_scrollY, 0, g_scrollMax);
+
+            Rect clipR(0, viewTop, rc.right, viewH);
+            g.SetClip(clipR);
 
             if (g_images.empty())
             {
-                DrawCenteredHint(g, rc, L"Drop images/folder here or click 'Add folder'");
+                DrawTextG(g, L"Drop images or a folder here", 0.f, (float)viewTop, (float)rc.right, (float)viewH, 22.f, C_TEXT, true, 0);
             }
             else
             {
-                int yOffset = contentTop + GRID_PADDING - g_scrollY;
+                int y0 = viewTop + PAD - g_scrollY;
+                int step = CELL + GAP;
 
-                for (size_t i = 0; i < g_images.size(); i++)
+                int firstRow = max(0, (g_scrollY - PAD) / step);
+                int rowsVisible = (viewH / step) + 3;
+
+                int totalRows = (int)((g_images.size() + cols - 1) / cols);
+                int lastRow = min(totalRows - 1, firstRow + rowsVisible);
+
+                for (int row = firstRow; row <= lastRow; row++)
                 {
-                    int col = (int)(i % cols);
-                    int row = (int)(i / cols);
-
-                    int x = GRID_PADDING + col * (CELL_SIZE + CELL_GAP);
-                    int y = yOffset + row * (CELL_SIZE + CELL_GAP);
-
-                    if (y + CELL_SIZE < contentTop || y > contentBottom) continue;
-
-                    Rect r(x, y, CELL_SIZE, CELL_SIZE);
-
-                    // lazy thumb build
-                    if (!g_thumbs[i])
-                        g_thumbs[i] = MakeThumb(g_images[i]);
-
-                    if (g_thumbs[i])
-                        g.DrawImage(g_thumbs[i].get(), r);
-                    else
+                    for (int col = 0; col < cols; col++)
                     {
-                        SolidBrush bad(Color(255, 45, 45, 45));
-                        g.FillRectangle(&bad, r);
-                    }
+                        size_t i = (size_t)row * (size_t)cols + (size_t)col;
+                        if (i >= g_images.size()) break;
 
-                    // selection (pink minimal)
-                    if ((int)i == g_selected)
-                    {
-                        Pen p(C_ACCENT, 3.f);
-                        g.DrawRectangle(&p, r);
-                        Pen p2(C_ACCENT_SOFT, 1.f);
-                        Rect inner(r.X + 3, r.Y + 3, r.Width - 6, r.Height - 6);
-                        g.DrawRectangle(&p2, inner);
-                    }
-                }
+                        int x = PAD + col * step;
+                        int y = y0 + row * step;
 
-                // subtle scroll indicator (mini)
-                if (g_scrollMax > 0)
-                {
-                    float t = (float)g_scrollY / (float)g_scrollMax;
-                    int barH = max(40, (int)(contentH * 0.18));
-                    int barY = contentTop + (int)((contentH - barH) * t);
-                    int barX = rc.right - 8;
-                    Pen sp(C_ACCENT_SOFT, 3.f);
-                    g.DrawLine(&sp, (REAL)barX, (REAL)barY, (REAL)barX, (REAL)(barY + barH));
+                        EnsureThumb(i);
+                        Rect r(x, y, CELL, CELL);
+
+                        if (g_thumbs[i] && g_thumbs[i]->GetLastStatus() == Ok)
+                        {
+                            g.DrawImage(g_thumbs[i].get(), r);
+                        }
+                        else
+                        {
+                            SolidBrush ph(Color(255, 18, 18, 18));
+                            Pen br(C_BORDER, 1.0f);
+                            g.FillRectangle(&ph, r);
+                            g.DrawRectangle(&br, r);
+                        }
+                    }
                 }
             }
+
+            g.ResetClip();
         }
-        // --- Processing ---
-        else if (g_screen == AppScreen::Processing)
+        else if (g_screen == Screen::Processing)
         {
-            SolidBrush panel(Color(255, 24, 24, 24));
-            g.FillRectangle(&panel, 0, contentTop, rc.right, contentH);
+            DrawTextG(g, L"Processing setup", 0.f, (float)TOOLBAR_H + 50.f, (float)rc.right, 40.f, 24.f, C_TEXT, true, 0);
 
-            // Title
-            {
-                FontFamily ff(L"Segoe UI");
-                Font title(&ff, 26.f, FontStyleBold, UnitPixel);
-                SolidBrush tx(C_TEXT);
+            RectI outPick{ PAD, TOOLBAR_H + 90, 420, 38 };
+            RectI startBtn{ PAD, TOOLBAR_H + 150, 160, 36 };
 
-                RectF tr(24.f, (REAL)contentTop + 28.f, (REAL)(rc.right - 48), 40.f);
-                g.DrawString(L"Processing", -1, &title, tr, nullptr, &tx);
-            }
+            SolidBrush box(Color(255, 28, 28, 28));
+            Pen br(C_BORDER, 1.0f);
+            g.FillRectangle(&box, outPick.x, outPick.y, outPick.w, outPick.h);
+            g.DrawRectangle(&br, outPick.x, outPick.y, outPick.w, outPick.h);
 
-            // Output folder line (ellipsized)
-            {
-                std::wstring line = g_outputFolder.empty() ? L"Output: (not set)" : (L"Output: " + g_outputFolder);
-                RectF r(24.f, (REAL)contentTop + 78.f, (REAL)(rc.right - 48), 22.f);
-                DrawTextEllipsis(g, line.c_str(), r, C_MUTED, 13.f, false);
-            }
+            Pen acc2(C_ACC, 2.0f);
+            g.DrawLine(&acc2, outPick.x + 2, outPick.y + outPick.h - 1, outPick.x + outPick.w - 2, outPick.y + outPick.h - 1);
 
-            // Progress text
-            {
-                FontFamily ff(L"Segoe UI");
-                Font f(&ff, 16.f, FontStyleRegular, UnitPixel);
-                SolidBrush tx(C_TEXT);
+            std::wstring outLine = g_outputFolder.empty() ? L"Choose output folder..." : EllipsizePath(g_outputFolder, 80);
+            DrawTextG(g, outLine, (float)outPick.x + 10.f, (float)outPick.y, (float)outPick.w - 20.f, (float)outPick.h, 13.f, g_outputFolder.empty() ? C_SUB : C_TEXT, false, -1);
 
-                std::wstring p =
-                    L"Images processed: " + std::to_wstring(g_processed) +
-                    L" / " + std::to_wstring((int)g_images.size());
+            bool canStart = !g_outputFolder.empty() && !g_images.empty() && !g_processing;
+            DrawButton(g, startBtn, g_processing ? L"Processing" : L"Start", !canStart);
 
-                RectF r(24.f, (REAL)contentTop + 120.f, (REAL)(rc.right - 48), 26.f);
-                g.DrawString(p.c_str(), -1, &f, r, nullptr, &tx);
-            }
+            int barX = PAD;
+            int barY = TOOLBAR_H + 230;
+            int barW = rc.right - PAD * 2;
+            int barH = 18;
 
-            // Progress bar
-            float t01 = g_images.empty() ? 0.f : (float)g_processed / (float)g_images.size();
-            DrawProgressBar(g, 24, contentTop + 160, rc.right - 48, 16, t01);
+            SolidBrush barBg(Color(255, 40, 40, 40));
+            g.FillRectangle(&barBg, barX, barY, barW, barH);
 
-            // A hint
-            {
-                RectF r(24.f, (REAL)contentTop + 196.f, (REAL)(rc.right - 48), 22.f);
-                DrawTextEllipsis(g,
-                    g_processing ? L"Working... (denoise will be added later)" : L"Ready. Click Next to continue.",
-                    r, C_MUTED, 13.f, false);
-            }
+            int total = max(1, (int)g_images.size());
+            int done = ClampI(g_processed, 0, total);
+            float k = (float)done / (float)total;
+            int fillW = (int)(barW * k);
 
-            // minimal accent frame around content
-            Pen frame(C_ACCENT_SOFT, 2.f);
-            g.DrawRectangle(&frame, 16, contentTop + 16, rc.right - 32, contentH - 32);
+            SolidBrush barFill(C_ACC);
+            g.FillRectangle(&barFill, barX, barY, fillW, barH);
+
+            Pen barBr(C_BORDER, 1.0f);
+            g.DrawRectangle(&barBr, barX, barY, barW, barH);
+
+            std::wstring ptxt = L"Processed: " + std::to_wstring(done) + L" / " + std::to_wstring((int)g_images.size());
+            DrawTextG(g, ptxt, (float)PAD, (float)barY + 26.f, (float)(rc.right - PAD * 2), 26.f, 14.f, C_SUB, false, -1);
         }
-        // --- Done ---
         else
         {
-            SolidBrush panel(Color(255, 24, 24, 24));
-            g.FillRectangle(&panel, 0, contentTop, rc.right, contentH);
+            DrawTextG(g, L"All done!", 0.f, (float)TOOLBAR_H + 40.f, (float)rc.right, 44.f, 28.f, C_TEXT, true, 0);
+            DrawTextG(g, L"Click Back to return to gallery", 0.f, (float)TOOLBAR_H + 80.f, (float)rc.right, 30.f, 14.f, C_SUB, false, 0);
 
-            // Title
-            {
-                FontFamily ff(L"Segoe UI");
-                Font title(&ff, 26.f, FontStyleBold, UnitPixel);
-                SolidBrush tx(C_TEXT);
-
-                RectF tr(24.f, (REAL)contentTop + 28.f, (REAL)(rc.right - 48), 40.f);
-                g.DrawString(L"All done!", -1, &title, tr, nullptr, &tx);
-            }
-
-            // Cat animation
             int cx = rc.right / 2;
-            int cy = contentTop + contentH / 2 + 30;
-            DrawCuteCat(g, cx, cy, g_animTick);
-
-            // Subtitle
-            {
-                RectF r(24.f, (REAL)(contentTop + 88), (REAL)(rc.right - 48), 22.f);
-                DrawTextEllipsis(g, L"You can go back to Gallery and process another folder.", r, C_MUTED, 13.f, false);
-            }
-
-            // accent frame
-            Pen frame(C_ACCENT_SOFT, 2.f);
-            g.DrawRectangle(&frame, 16, contentTop + 16, rc.right - 32, contentH - 32);
+            int cy = TOOLBAR_H + 330;
+            DrawCat(g, cx, cy, g_doneTick);
         }
 
-        // ===== present backbuffer =====
-        BitBlt(hdc, 0, 0, rc.right, rc.bottom, g_memDC, 0, 0, SRCCOPY);
+        BitBlt(hdc, 0, 0, rc.right, rc.bottom, memDC, 0, 0, SRCCOPY);
+
+        SelectObject(memDC, oldBmp);
+        DeleteObject(memBmp);
+        DeleteDC(memDC);
 
         EndPaint(hWnd, &ps);
         return 0;
     }
 
     case WM_DESTROY:
-        StopScrollTimer(hWnd);
-        StopAnimTimer(hWnd);
+        KillTimer(hWnd, TIMER_SCROLL);
         KillTimer(hWnd, TIMER_PROCESS);
-        ReleaseBackBuffer();
+        KillTimer(hWnd, TIMER_DONE_ANIM);
         PostQuitMessage(0);
         return 0;
     }
+
     return DefWindowProcW(hWnd, msg, wParam, lParam);
 }
 
-// ================== WinMain ==================
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow)
 {
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
     GdiplusStartupInput gd;
     GdiplusStartup(&g_gdiplusToken, &gd, nullptr);
-
-    // init default output folder
-    std::wstring desk = GetDesktopPath();
-    if (!desk.empty()) g_outputFolder = desk + L"\\MangaDenoiser_Output";
 
     WNDCLASSW wc{};
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInst;
     wc.lpszClassName = WINDOW_CLASS;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = nullptr; // we fully paint ourselves
+    wc.hbrBackground = CreateSolidBrush(RGB(24, 24, 24));
     RegisterClassW(&wc);
 
     HWND hWnd = CreateWindowW(
@@ -1040,7 +820,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow)
         WINDOW_TITLE,
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT,
-        1200, 820,
+        1200, 800,
         nullptr, nullptr,
         hInst, nullptr
     );
@@ -1055,5 +835,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow)
     }
 
     GdiplusShutdown(g_gdiplusToken);
+    CoUninitialize();
     return 0;
 }
