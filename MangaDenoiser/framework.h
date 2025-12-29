@@ -1,15 +1,18 @@
-﻿// header.h: включаемый файл для стандартных системных включаемых файлов
-// или включаемые файлы для конкретного проекта
-//
+﻿#pragma once
 
-#pragma once
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
 
 #include "targetver.h"
-#define WIN32_LEAN_AND_MEAN             // Исключите редко используемые компоненты из заголовков Windows
-// Файлы заголовков Windows
 #include <windows.h>
-// Файлы заголовков среды выполнения C
-#include <stdlib.h>
-#include <malloc.h>
-#include <memory.h>
-#include <tchar.h>
+
+#include <windowsx.h>
+#include <shellapi.h>
+#include <shlobj.h>
+#include <commdlg.h>
+#include <objbase.h>
+
+#include <gdiplus.h>
+#pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "Shell32.lib")
+#pragma comment(lib, "Comdlg32.lib")

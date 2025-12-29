@@ -3,5 +3,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="MangaDenoiser/MangaDenoiser.vcxproj" />
+  <Project Path="../../../../../../source/repos/MangaDenoiser/MangaDenoiser/MangaDenoiser.vcxproj" Id="5b403b3b-bf28-4f11-8ebd-215310529621" />
 </Solution>

@@ -77,6 +77,7 @@
       <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -105,6 +106,7 @@
       <PreprocessorDefinitions>_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -130,10 +132,31 @@
     <ClInclude Include="framework.h" />
     <ClInclude Include="MangaDenoiser.h" />
     <ClInclude Include="Resource.h" />
+    <ClInclude Include="src\app_state.h" />
+    <ClInclude Include="src\filesystem.h" />
+    <ClInclude Include="src\imaging.h" />
+    <ClInclude Include="src\input.h" />
+    <ClInclude Include="src\tooltip.h" />
+    <ClInclude Include="src\ui_common.h" />
+    <ClInclude Include="src\ui_views.h" />
+    <ClInclude Include="src\worker.h" />
     <ClInclude Include="targetver.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="MangaDenoiser.cpp" />
+    <ClCompile Include="MangaDenoiser.cpp">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="src\app_state.cpp" />
+    <ClCompile Include="src\filesystem.cpp" />
+    <ClCompile Include="src\imaging.cpp" />
+    <ClCompile Include="src\input.cpp" />
+    <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\tooltip.cpp" />
+    <ClCompile Include="src\ui_common.cpp" />
+    <ClCompile Include="src\ui_views.cpp" />
+    <ClCompile Include="src\wndproc.cpp" />
+    <ClCompile Include="src\worker.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="MangaDenoiser.rc" />
