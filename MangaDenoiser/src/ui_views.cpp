@@ -1,3 +1,4 @@
+#include "ui_views.h"
 #define NOMINMAX
 #include <windows.h>
 
@@ -11,70 +12,6 @@
 using namespace Gdiplus;
 using std::min;
 using std::max;
-
-struct RectI { int x, y, w, h; };
-static inline int ClampI(int v, int a, int b) { return (v < a) ? a : (v > b) ? b : v; }
-static inline int iabs(int v) { return v < 0 ? -v : v; }
-
-enum class View { Home, Pick, Setup, Processing, Done };
-enum class Tool { None, Denoise, Merge, Rename };
-enum class DenoiseMode { Manga, Color, Balanced };
-enum class EditField { None, MergeName, RenPrefix, RenSuffix };
-
-extern const int TOOLBAR_H;
-extern const int FOOTER_H;
-extern const int PAD;
-extern const int CELL;
-extern const int GAP;
-
-extern View g_view;
-extern Tool g_tool;
-
-extern std::vector<std::wstring> g_inputs;
-extern std::vector<std::unique_ptr<Bitmap>> g_thumbs;
-
-extern std::wstring g_outputFolder;
-
-extern std::wstring g_status;
-
-extern int g_scrollY;
-extern int g_scrollTarget;
-extern int g_scrollMax;
-
-extern int g_animTick;
-
-extern bool g_processing;
-extern int g_processed;
-extern int g_total;
-extern long long g_elapsedMs;
-
-extern int g_outWidth;
-extern DenoiseMode g_dnMode;
-
-extern std::wstring g_mergeOutFolder;
-extern bool g_mergeJpeg;
-extern std::wstring g_mergeName;
-
-extern std::wstring g_renPrefix;
-extern std::wstring g_renSuffix;
-extern int g_renStart;
-extern int g_renPad;
-
-extern bool g_ttShow;
-extern std::wstring g_ttText;
-extern POINT g_ttPos;
-
-extern EditField g_editField;
-extern std::wstring g_editBuf;
-
-extern Color C_BG;
-extern Color C_PANEL;
-extern Color C_BTN;
-extern Color C_BTN_DIS;
-extern Color C_BORDER;
-extern Color C_TEXT;
-extern Color C_SUB;
-extern Color C_ACC;
 
 extern void EnsureThumb(size_t i);
 
@@ -96,7 +33,7 @@ extern void DrawTextG(Graphics& g,
 extern void RoundedPath(GraphicsPath& path, float x, float y, float w, float h, float r);
 extern void FillRoundRect(Graphics& g, const RectF& r, float radius, Brush& fill, Pen* border);
 
-extern void DrawButton(Graphics& g, const RectI& r, const wchar_t* text, bool disabled, bool accentLine /*=true*/);
+extern void DrawButton(Graphics& g, const RectI& r, const wchar_t* text, bool disabled, bool accentLine);
 extern void DrawBackArrow(Graphics& g, const RectI& r);
 extern void DrawInfoIcon(Graphics& g, const RectI& r);
 extern void DrawWindowAccent(Graphics& g, int w, int h);
@@ -194,7 +131,7 @@ static void DrawFooter(Graphics& g, int w, int h, bool showBack, bool showNext, 
     );
 }
 
-static void DrawPeekingCat(Graphics& g, int w, int h, int t)
+void DrawPeekingCat(Graphics& g, int w, int h, int t)
 {
     int baseY = h - 12;
     int cx = w / 2;
@@ -233,7 +170,7 @@ static void DrawPeekingCat(Graphics& g, int w, int h, int t)
     g.DrawLine(&whisk, cx + 55, baseY - 35, cx + 145, baseY - 20);
 }
 
-static void DrawDoneCat(Graphics& g, int cx, int cy, int t)
+void DrawDoneCat(Graphics& g, int cx, int cy, int t)
 {
     SolidBrush face(Color(255, 56, 56, 56));
     SolidBrush body(Color(255, 50, 50, 50));
@@ -311,19 +248,25 @@ void DrawHome(Graphics& g, const RECT& rc)
     DrawTextG(g, L"Choose a tool", 0.f, 142.f, (float)w, 28.f, 15.f, C_SUB, false, 0);
 
     int bw = 180;
-    int bx = (w - (bw * 3 + 24 * 2)) / 2;
+    int gap = 24;
+    int rowGap = 16;
+
+    int totalW = bw * 2 + gap;
+    int bx = (w - totalW) / 2;
     int by = 220;
 
     RectI b1{ bx, by, bw, 44 };
-    RectI b2{ bx + bw + 24, by, bw, 44 };
-    RectI b3{ bx + (bw + 24) * 2, by, bw, 44 };
+    RectI b2{ bx + bw + gap, by, bw, 44 };
+    RectI b3{ bx, by + 44 + rowGap, bw, 44 };
+    RectI b4{ bx + bw + gap, by + 44 + rowGap, bw, 44 };
 
     DrawButton(g, b1, L"Denoise", false, true);
     DrawButton(g, b2, L"Merge", false, true);
     DrawButton(g, b3, L"Rename", false, true);
+    DrawButton(g, b4, L"Crop", false, true);
 
     DrawTextG(g, L"Tip: after choosing a tool, you can drag & drop a folder/files.",
-        0.f, (float)(by + 64), (float)w, 24.f, 13.f, C_SUB, false, 0);
+        0.f, (float)(by + 64 + 44), (float)w, 24.f, 13.f, C_SUB, false, 0);
 
     DrawPeekingCat(g, w, h, g_animTick);
 }
@@ -339,11 +282,15 @@ void DrawPick(Graphics& g, const RECT& rc)
     DrawToolbarCommon(g, w, true);
 
     RectI btnChoose{ PAD + 58, 12, 160, 32 };
-    DrawButton(g, btnChoose, L"Choose folder", false, true);
+    const wchar_t* chooseTxt = (g_tool == Tool::Crop) ? L"Choose file" : L"Choose folder";
+    DrawButton(g, btnChoose, chooseTxt, false, true);
 
-    std::wstring toolName = (g_tool == Tool::Denoise) ? L"Denoise"
-        : (g_tool == Tool::Merge) ? L"Merge"
-        : L"Rename";
+    std::wstring toolName =
+        (g_tool == Tool::Denoise) ? L"Denoise" :
+        (g_tool == Tool::Merge) ? L"Merge" :
+        (g_tool == Tool::Rename) ? L"Rename" :
+        L"Crop";
+
     DrawTextG(g, toolName, (float)(PAD + 230), 0.f, (float)(w - PAD - 230), (float)TOOLBAR_H, 16.f, C_TEXT, true, -1);
 
     int viewTop = TOOLBAR_H;
@@ -354,7 +301,10 @@ void DrawPick(Graphics& g, const RECT& rc)
 
     if (g_inputs.empty())
     {
-        std::wstring hint = L"Drop a folder or files here\nor use 'Choose folder'";
+        std::wstring hint =
+            (g_tool == Tool::Crop)
+            ? L"Drop ONE image here\nor use 'Choose file'"
+            : L"Drop a folder or files here\nor use 'Choose folder'";
         DrawTextG(g, hint, 0.f, (float)viewTop, (float)w, (float)viewH, 22.f, C_TEXT, true, 0);
     }
     else
@@ -397,7 +347,7 @@ void DrawPick(Graphics& g, const RECT& rc)
 
     g.ResetClip();
 
-    bool canNext = !g_inputs.empty();
+    bool canNext = (g_tool == Tool::Crop) ? (g_inputs.size() == 1) : (!g_inputs.empty());
     DrawFooter(g, w, h, true, true, L"Next", !canNext);
 
     DrawWindowAccent(g, w, h);
@@ -408,6 +358,119 @@ static std::wstring FieldTextWithCaret(EditField f, const std::wstring& v)
 {
     if (g_editField != f) return v;
     return g_editBuf + L"|";
+}
+
+static void DrawCropSetup(Graphics& g, const RECT& rc)
+{
+    int w = rc.right;
+    int h = rc.bottom;
+
+    int y = TOOLBAR_H + 28;
+    Pen br(C_BORDER, 1.0f);
+    SolidBrush box(Color(255, 28, 28, 28));
+
+    DrawTextG(g, L"Output folder", (float)PAD, (float)y, (float)w, 24.f, 14.f, C_SUB, false, -1);
+
+    RectI outBox{ PAD, y + 28, 420, 38 };
+    g.FillRectangle(&box, outBox.x, outBox.y, outBox.w, outBox.h);
+    g.DrawRectangle(&br, outBox.x, outBox.y, outBox.w, outBox.h);
+    Pen acc(C_ACC, 2.0f);
+    g.DrawLine(&acc, outBox.x, outBox.y + outBox.h - 1, outBox.x + outBox.w, outBox.y + outBox.h - 1);
+
+    std::wstring outLine = g_outputFolder.empty() ? L"Choose output folder..." : EllipsizePath(g_outputFolder, 70);
+    DrawTextG(g, outLine, (float)outBox.x + 10.f, (float)outBox.y, (float)outBox.w - 20.f, (float)outBox.h, 13.f,
+        g_outputFolder.empty() ? C_SUB : C_TEXT, false, -1);
+
+    int y2 = y + 92;
+    DrawTextG(g, L"Format", (float)PAD, (float)y2, 120.f, 24.f, 14.f, C_SUB, false, -1);
+
+    RectI fPng{ PAD + 120, y2 - 2, 100, 28 };
+    RectI fJpg{ PAD + 230, y2 - 2, 110, 28 };
+
+    auto drawFmt = [&](const RectI& r, const wchar_t* label, bool active)
+        {
+            SolidBrush bb(active ? Color(255, 36, 36, 36) : Color(255, 28, 28, 28));
+            Pen bbr(active ? C_ACC : C_BORDER, active ? 2.f : 1.f);
+            g.FillRectangle(&bb, r.x, r.y, r.w, r.h);
+            g.DrawRectangle(&bbr, r.x, r.y, r.w, r.h);
+            DrawTextG(g, label, (float)r.x, (float)r.y, (float)r.w, (float)r.h, 13.f, active ? C_TEXT : C_SUB, active, 0);
+        };
+
+    drawFmt(fPng, L"PNG", !g_cropJpeg);
+    drawFmt(fJpg, L"JPEG", g_cropJpeg);
+
+    int previewTop = y2 + 50;
+    int previewBottom = h - FOOTER_H - 12;
+    int previewH = max(0, previewBottom - previewTop);
+    int previewW = w - PAD * 2;
+
+    RectI pv{ PAD, previewTop, previewW, previewH };
+    SolidBrush pvBg(Color(255, 18, 18, 18));
+    g.FillRectangle(&pvBg, pv.x, pv.y, pv.w, pv.h);
+    g.DrawRectangle(&br, pv.x, pv.y, pv.w, pv.h);
+
+    // Hotkey / gesture hints (keep short, single-line)
+    DrawTextG(g, L"LMB: add guide    Drag guide: move    RMB: delete    Wheel: scroll",
+        (float)PAD, (float)(previewTop - 30), (float)(w - PAD * 2), 18.f, 12.f, C_SUB, false, -1);
+    DrawTextG(g, L"Ctrl+Wheel / Ctrl+ +/- : zoom    Ctrl+0: fit",
+        (float)PAD, (float)(previewTop - 14), (float)(w - PAD * 2), 18.f, 12.f, C_SUB, false, -1);
+
+    if (!g_cropBmp || g_cropBmp->GetLastStatus() != Ok || g_inputs.size() != 1)
+    {
+        DrawTextG(g, L"Select exactly one image on previous step", 0.f, (float)previewTop, (float)w, (float)previewH, 18.f, C_SUB, true, 0);
+        return;
+    }
+
+    int imgW = (int)g_cropBmp->GetWidth();
+    int imgH = (int)g_cropBmp->GetHeight();
+    if (imgW <= 0 || imgH <= 0) return;
+
+    float baseScale = (float)pv.w / (float)imgW;
+    float scale = baseScale * max(0.05f, g_cropZoom);
+    if (scale <= 0.0001f) scale = 0.0001f;
+
+    int visibleImgH = (int)((float)pv.h / scale);
+    if (visibleImgH < 1) visibleImgH = 1;
+
+    g_cropScrollMax = max(0, imgH - visibleImgH);
+    g_cropScrollY = ClampI(g_cropScrollY, 0, g_cropScrollMax);
+
+    int srcH = min(visibleImgH, imgH - g_cropScrollY);
+    Rect src(0, g_cropScrollY, imgW, srcH);
+
+    // Center image horizontally when zoomed out; clip when zoomed in.
+    float dstWf = (float)imgW * scale;
+    float dstHf = (float)srcH * scale;
+    float dstXf = (float)pv.x + ((float)pv.w - dstWf) * 0.5f;
+    RectF dst(dstXf, (REAL)pv.y, (REAL)dstWf, (REAL)dstHf);
+
+    Region oldClip;
+    g.GetClip(&oldClip);
+    g.SetClip(Rect(pv.x, pv.y, pv.w, pv.h));
+    g.DrawImage(g_cropBmp.get(), dst, (REAL)src.X, (REAL)src.Y, (REAL)src.Width, (REAL)src.Height, UnitPixel);
+
+    // Draw horizontal guides.
+    Pen pen(C_ACC, 2.f);
+    std::vector<int> guides;
+    CropGetSortedGuides(imgH, guides);
+    for (int i = 0; i < (int)guides.size(); i++)
+    {
+        int gy = guides[(size_t)i];
+        float sy = (float)pv.y + (float)(gy - g_cropScrollY) * scale;
+        if (sy < pv.y - 2 || sy > pv.y + pv.h + 2) continue;
+
+        g.DrawLine(&pen, (REAL)pv.x, sy, (REAL)(pv.x + pv.w), sy);
+        // small label
+        DrawTextG(g, L"|", (float)pv.x + 8.f, sy - 10.f, 10.f, 20.f, 14.f, C_ACC, true, -1);
+    }
+    g.SetClip(&oldClip);
+
+    // Bottom info: segments + zoom.
+    int segCount = CropGetSegmentCount(imgH);
+    int zoomPct = (int)std::round(g_cropZoom * 100.0f);
+    std::wstring info = L"Segments: " + std::to_wstring(segCount) + L"    Guides: " + std::to_wstring((int)guides.size()) +
+        L"    Zoom: " + std::to_wstring(zoomPct) + L"%";
+    DrawTextG(g, info, (float)pv.x + 8.f, (float)(pv.y + pv.h - 18), (float)pv.w - 16.f, 18.f, 12.f, C_SUB, false, -1);
 }
 
 void DrawSetup(Graphics& g, const RECT& rc)
@@ -426,7 +489,8 @@ void DrawSetup(Graphics& g, const RECT& rc)
     std::wstring toolName =
         (g_tool == Tool::Denoise) ? L"Denoise setup" :
         (g_tool == Tool::Merge) ? L"Merge setup" :
-        L"Rename setup";
+        (g_tool == Tool::Rename) ? L"Rename setup" :
+        L"Crop setup";
 
     DrawTextG(g, toolName, (float)(PAD + 58), 0.f, (float)(w - PAD - 58), (float)TOOLBAR_H, 16.f, C_TEXT, true, -1);
 
@@ -544,7 +608,14 @@ void DrawSetup(Graphics& g, const RECT& rc)
         bool canStart = !g_mergeOutFolder.empty() && !g_inputs.empty();
         DrawFooter(g, w, h, true, true, L"Start", !canStart);
     }
-    else // Rename
+    else if (g_tool == Tool::Crop)
+    {
+        DrawCropSetup(g, rc);
+        int imgH = (g_cropBmp && g_cropBmp->GetLastStatus() == Ok) ? (int)g_cropBmp->GetHeight() : 0;
+        bool canStart = !g_outputFolder.empty() && (g_inputs.size() == 1) && (imgH > 0) && (CropGetSegmentCount(imgH) > 0);
+        DrawFooter(g, w, h, true, true, L"Start", !canStart);
+    }
+    else 
     {
         DrawTextG(g, L"Output folder", (float)PAD, (float)y, (float)w, 24.f, 14.f, C_SUB, false, -1);
 
@@ -625,9 +696,12 @@ void DrawProcessing(Graphics& g, const RECT& rc)
 
     DrawToolbarCommon(g, w, true);
 
-    std::wstring title = (g_tool == Tool::Denoise) ? L"Denoise"
-        : (g_tool == Tool::Merge) ? L"Merge"
-        : L"Rename";
+    std::wstring title =
+        (g_tool == Tool::Denoise) ? L"Denoise" :
+        (g_tool == Tool::Merge) ? L"Merge" :
+        (g_tool == Tool::Rename) ? L"Rename" :
+        L"Crop";
+
     DrawTextG(g, title, (float)(PAD + 58), 0.f, (float)(w - PAD - 58), (float)TOOLBAR_H, 16.f, C_TEXT, true, -1);
 
     DrawTextG(g, L"Processing...", 0.f, (float)(TOOLBAR_H + 70), (float)w, 34.f, 24.f, C_TEXT, true, 0);

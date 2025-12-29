@@ -1,6 +1,8 @@
 #include "framework.h"
 #include "ui_common.h"
 
+#include <cmath>
+
 void DrawTextG(Graphics& g, const std::wstring& text, float x, float y, float w, float h, float size, Color color, bool bold, int alignH)
 {
     FontFamily ff(L"Segoe UI");
@@ -128,7 +130,21 @@ void DrawFooter(Graphics& g, int w, int h, bool showBack, bool showNext, const s
         DrawButton(g, btnNext, nextText.c_str(), nextDisabled);
     }
 
-    std::wstring line = L"Items: " + std::to_wstring((int)g_inputs.size()) + L"    Status: " + g_status;
+    std::wstring line;
+    if (g_tool == Tool::Crop && g_view == View::Setup && g_cropBmp && g_cropBmp->GetLastStatus() == Ok)
+    {
+        int imgH = (int)g_cropBmp->GetHeight();
+        std::vector<int> guides;
+        CropGetSortedGuides(imgH, guides);
+        int segments = max(0, (int)guides.size() + 1);
+        int zoomPct = (int)std::round(g_cropZoom * 100.0f);
+        line = L"Segments: " + std::to_wstring(segments) + L"    Guides: " + std::to_wstring((int)guides.size()) +
+            L"    Zoom: " + std::to_wstring(zoomPct) + L"%    Status: " + g_status;
+    }
+    else
+    {
+        line = L"Items: " + std::to_wstring((int)g_inputs.size()) + L"    Status: " + g_status;
+    }
     DrawTextG(g, line, (float)leftX, (float)(h - FOOTER_H),
         (float)(w - leftX - PAD - (showNext ? (btnNext.w + 16) : 0)),
         (float)FOOTER_H, 13.f, C_SUB, false, -1);

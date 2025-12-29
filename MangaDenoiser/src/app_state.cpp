@@ -13,6 +13,9 @@ const int PAD = 16;
 const int CELL = 140;
 const int GAP = 16;
 
+const UINT_PTR TIMER_UI = 1;
+const UINT_PTR TIMER_ANIM = 2;
+
 bool PtIn(const RectI& r, int px, int py) { return px >= r.x && px < (r.x + r.w) && py >= r.y && py < (r.y + r.h); }
 int ClampI(int v, int a, int b) { return (v < a) ? a : (v > b) ? b : v; }
 int iabs(int v) { return v < 0 ? -v : v; }
@@ -72,6 +75,52 @@ std::wstring g_editBuf;
 
 HANDLE g_worker = nullptr;
 HWND g_hWndMain = nullptr;
+
+std::unique_ptr<Bitmap> g_cropBmp;
+std::wstring g_cropSrcPath;
+
+int g_cropScrollY = 0;
+int g_cropScrollMax = 0;
+
+std::vector<int> g_cropGuides;
+bool g_cropDragging = false;
+int  g_cropDragGuideIndex = -1;
+float g_cropZoom = 1.0f;
+
+bool g_cropJpeg = false;
+int  g_cropJpegQuality = 92;
+
+
+
+std::wstring g_cropPrefix = L"crop_";
+int g_cropPad = 3;
+
+static void UniqueSorted(std::vector<int>& v)
+{
+    std::sort(v.begin(), v.end());
+    v.erase(std::unique(v.begin(), v.end()), v.end());
+}
+
+void CropGetSortedGuides(int imgH, std::vector<int>& outGuides)
+{
+    outGuides.clear();
+    outGuides.reserve(g_cropGuides.size());
+    for (int y : g_cropGuides)
+    {
+        // Internal guides only; 0 and imgH are implicit bounds.
+        if (y <= 0 || y >= imgH) continue;
+        outGuides.push_back(ClampI(y, 1, max(1, imgH - 1)));
+    }
+    UniqueSorted(outGuides);
+}
+
+int CropGetSegmentCount(int imgH)
+{
+    if (imgH <= 0) return 0;
+    std::vector<int> g;
+    CropGetSortedGuides(imgH, g);
+    return (int)g.size() + 1;
+}
 
 void SetStatus(const std::wstring& s) { g_status = s; }
 
@@ -152,6 +201,22 @@ std::wstring PadNumber(int v, int width)
     return s;
 }
 
+static void ResetCropState()
+{
+    g_cropBmp.reset();
+    g_cropSrcPath.clear();
+    g_cropScrollY = 0;
+    g_cropScrollMax = 0;
+    g_cropGuides.clear();
+    g_cropDragging = false;
+    g_cropDragGuideIndex = -1;
+    g_cropZoom = 1.0f;
+    g_cropJpeg = false;
+    g_cropJpegQuality = 92;
+    g_cropPrefix = L"crop_";
+    g_cropPad = 3;
+}
+
 void ClearAllStateToHome()
 {
     g_view = View::Home;
@@ -173,6 +238,7 @@ void ClearAllStateToHome()
     g_editBuf.clear();
 
     ResetScroll();
+    ResetCropState();
 }
 void ClearToolStateKeepTool()
 {
@@ -191,4 +257,5 @@ void ClearToolStateKeepTool()
     g_editBuf.clear();
 
     ResetScroll();
+    ResetCropState();
 }

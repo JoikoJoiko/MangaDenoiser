@@ -23,27 +23,58 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         HDROP hDrop = (HDROP)wParam;
         LoadInputsFromDrop(hDrop);
         DragFinish(hDrop);
+
+        if (g_tool == Tool::Crop && g_inputs.size() > 1)
+        {
+            g_inputs.resize(1);
+            g_thumbs.resize(1);
+            if (!g_thumbs.empty()) g_thumbs[0].reset();
+        }
+
         InvalidateRect(hWnd, nullptr, TRUE);
         return 0;
     }
 
     case WM_MOUSEWHEEL:
     {
+        short d = GET_WHEEL_DELTA_WPARAM(wParam);
+
         if (g_view == View::Pick && !g_inputs.empty())
         {
-            short d = GET_WHEEL_DELTA_WPARAM(wParam);
             g_scrollTarget -= (d / 120) * 160;
             RECT rc; GetClientRect(hWnd, &rc);
             ComputeScrollMax(rc);
             g_scrollTarget = ClampI(g_scrollTarget, 0, g_scrollMax);
             InvalidateRect(hWnd, nullptr, FALSE);
+            return 0;
         }
+
+        if (g_view == View::Setup && g_tool == Tool::Crop)
+        {
+            RECT rc; GetClientRect(hWnd, &rc);
+            POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            // For WM_MOUSEWHEEL, lParam is in screen coordinates.
+            ScreenToClient(hWnd, &pt);
+            HandleSetupMouseWheel(hWnd, d, pt.x, pt.y, rc);
+            return 0;
+        }
+
         return 0;
     }
 
     case WM_MOUSEMOVE:
-        UpdateTooltipByMouse(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+    {
+        int mx = GET_X_LPARAM(lParam);
+        int my = GET_Y_LPARAM(lParam);
+        UpdateTooltipByMouse(mx, my);
+
+        if (g_view == View::Setup && g_tool == Tool::Crop)
+        {
+            RECT rc; GetClientRect(hWnd, &rc);
+            HandleSetupMouseMove(hWnd, mx, my, rc);
+        }
         return 0;
+    }
 
     case WM_CHAR:
         HandleCharInput(hWnd, (wchar_t)wParam);
@@ -52,6 +83,37 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_KEYDOWN:
         if (wParam == VK_ESCAPE && g_editField != EditField::None) { CancelEdit(); InvalidateRect(hWnd, nullptr, FALSE); return 0; }
         if (wParam == VK_RETURN && g_editField != EditField::None) { CommitEdit(); InvalidateRect(hWnd, nullptr, FALSE); return 0; }
+
+        if (g_view == View::Setup && g_tool == Tool::Crop)
+        {
+            bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            if (ctrl && wParam == 'Z')
+            {
+                if (!g_cropGuides.empty()) g_cropGuides.pop_back();
+                InvalidateRect(hWnd, nullptr, FALSE);
+                return 0;
+            }
+
+            if (ctrl && (wParam == VK_OEM_PLUS || wParam == VK_ADD))
+            {
+                g_cropZoom = max(0.25f, min(8.0f, g_cropZoom * 1.1f));
+                InvalidateRect(hWnd, nullptr, FALSE);
+                return 0;
+            }
+            if (ctrl && (wParam == VK_OEM_MINUS || wParam == VK_SUBTRACT))
+            {
+                g_cropZoom = max(0.25f, min(8.0f, g_cropZoom / 1.1f));
+                InvalidateRect(hWnd, nullptr, FALSE);
+                return 0;
+            }
+            if (ctrl && (wParam == '0' || wParam == VK_NUMPAD0))
+            {
+                g_cropZoom = 1.0f;
+                InvalidateRect(hWnd, nullptr, FALSE);
+                return 0;
+            }
+        }
+
         return 0;
 
     case WM_LBUTTONDOWN:
@@ -64,6 +126,32 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (g_view == View::Pick) { HandlePickClick(hWnd, mx, my, rc); return 0; }
         if (g_view == View::Setup) { HandleSetupClick(hWnd, mx, my, rc); return 0; }
         if (g_view == View::Done) { HandleDoneClick(hWnd, mx, my, rc); return 0; }
+        return 0;
+    }
+
+    case WM_LBUTTONUP:
+    {
+        if (g_view == View::Setup && g_tool == Tool::Crop)
+        {
+            RECT rc; GetClientRect(hWnd, &rc);
+            int mx = GET_X_LPARAM(lParam);
+            int my = GET_Y_LPARAM(lParam);
+            HandleSetupLButtonUp(hWnd, mx, my, rc);
+            return 0;
+        }
+        return 0;
+    }
+
+    case WM_RBUTTONDOWN:
+    {
+        if (g_view == View::Setup && g_tool == Tool::Crop)
+        {
+            RECT rc; GetClientRect(hWnd, &rc);
+            int mx = GET_X_LPARAM(lParam);
+            int my = GET_Y_LPARAM(lParam);
+            HandleSetupRButtonDown(hWnd, mx, my, rc);
+            return 0;
+        }
         return 0;
     }
 

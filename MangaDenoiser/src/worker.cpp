@@ -1,5 +1,6 @@
 #include "worker.h"
 #include "app_state.h"
+#include "worker_crop.h"
 
 #define NOMINMAX
 #include <windows.h>
@@ -13,7 +14,6 @@
 using namespace Gdiplus;
 
 static volatile LONG g_cancelFlag = 0;
-
 
 static bool EnsureDirExists(const std::wstring& dir)
 {
@@ -36,7 +36,7 @@ static std::wstring GetFileExtWithDot(const std::wstring& path)
 {
     size_t dot = path.find_last_of(L'.');
     if (dot == std::wstring::npos) return L"";
-    return path.substr(dot); 
+    return path.substr(dot);
 }
 
 static int GetEncoderClsid(const WCHAR* format, CLSID* pClsid)
@@ -81,7 +81,6 @@ static bool SaveBitmap(Bitmap* bmp, const std::wstring& outPath, bool jpeg, ULON
 
     return bmp->Save(outPath.c_str(), &clsid, &ep) == Ok;
 }
-
 
 static std::unique_ptr<Bitmap> LoadBitmap32(const std::wstring& path)
 {
@@ -182,7 +181,7 @@ static void Unsharp(std::vector<BYTE>& io, const std::vector<BYTE>& blurred, int
 {
     if (io.size() != blurred.size()) return;
 
-    const int a = std::max(0, std::min(200, amount)); // %
+    const int a = std::max(0, std::min(200, amount));
     for (size_t i = 0; i < io.size(); i += 4)
     {
         int ob = io[i + 0], og = io[i + 1], orr = io[i + 2], oa = io[i + 3];
@@ -223,7 +222,7 @@ static void MangaStyle(std::vector<BYTE>& px, int w, int h)
                 for (int xx = std::max(0, x - 1); xx <= std::min(w - 1, x + 1); ++xx)
                 {
                     int k = idx(xx, yy);
-                    vals[c++] = tmp[k]; 
+                    vals[c++] = tmp[k];
                 }
             }
 
@@ -288,7 +287,6 @@ static bool ApplyDenoise(Bitmap* bmp32, DenoiseMode mode)
     return true;
 }
 
-
 static bool DoRenameOne(const std::wstring& src, const std::wstring& outDir, int index)
 {
     std::wstring ext = GetFileExtWithDot(src);
@@ -349,7 +347,7 @@ static bool DoMergeAll(const std::vector<std::wstring>& inputs, const std::wstri
         scaledH[i] = dh;
         totalH += dh;
 
-        if (totalH > 2000000LL) 
+        if (totalH > 2000000LL)
             return false;
     }
 
@@ -383,7 +381,10 @@ static DWORD WINAPI WorkerThread(LPVOID param)
     HWND hWnd = (HWND)param;
     InterlockedExchange(&g_cancelFlag, 0);
 
-    const int total = (int)g_inputs.size();
+    int expectedCropTotal = 0;
+    if (g_tool == Tool::Crop && g_cropBmp && g_cropBmp->GetLastStatus() == Ok)
+        expectedCropTotal = CropGetSegmentCount((int)g_cropBmp->GetHeight());
+    const int total = (g_tool == Tool::Crop) ? expectedCropTotal : (int)g_inputs.size();
     ULONGLONG t0 = GetTickCount64();
 
     g_total = total;
@@ -438,6 +439,20 @@ static DWORD WINAPI WorkerThread(LPVOID param)
             PostMessageW(hWnd, WM_APP_PROGRESS, (WPARAM)g_processed, (LPARAM)total);
         }
     }
+    else if (g_tool == Tool::Crop)
+    {
+        if (!EnsureDirExists(g_outputFolder)) ok = false;
+
+        if (ok)
+        {
+            PostMessageW(hWnd, WM_APP_PROGRESS, 0, (LPARAM)total);
+
+            WorkerRunCrop(hWnd);
+
+            g_processed = total;
+            PostMessageW(hWnd, WM_APP_PROGRESS, (WPARAM)g_processed, (LPARAM)total);
+        }
+    }
 
     ULONGLONG t1 = GetTickCount64();
     g_elapsedMs = (long long)(t1 - t0);
@@ -457,7 +472,12 @@ void StartWorker(HWND hWnd)
 
     g_processing = true;
     g_processed = 0;
-    g_total = (int)g_inputs.size();
+
+    if (g_tool == Tool::Crop && g_cropBmp && g_cropBmp->GetLastStatus() == Ok)
+        g_total = CropGetSegmentCount((int)g_cropBmp->GetHeight());
+    else
+        g_total = (int)g_inputs.size();
+
     g_elapsedMs = 0;
 
     DWORD tid = 0;

@@ -51,6 +51,9 @@
     <ClInclude Include="src\worker.h">
       <Filter>Исходные файлы</Filter>
     </ClInclude>
+    <ClInclude Include="src\worker_crop.h">
+      <Filter>Исходные файлы</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="MangaDenoiser.cpp">
@@ -84,6 +87,9 @@
       <Filter>Исходные файлы</Filter>
     </ClCompile>
     <ClCompile Include="src\worker.cpp">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
+    <ClCompile Include="src\worker_crop.cpp">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
   </ItemGroup>

@@ -25,11 +25,16 @@ extern const int PAD;
 extern const int CELL;
 extern const int GAP;
 
-inline constexpr UINT_PTR TIMER_UI = 1;
-inline constexpr UINT_PTR TIMER_ANIM = 2;
+extern const UINT_PTR TIMER_UI;
+extern const UINT_PTR TIMER_ANIM;
 
-inline constexpr UINT WM_APP_PROGRESS = WM_APP + 1;
-inline constexpr UINT WM_APP_DONE = WM_APP + 2;
+// App-defined messages (posted from worker thread)
+// Must be usable in `case` labels.
+enum : UINT
+{
+    WM_APP_PROGRESS = WM_APP + 1,
+    WM_APP_DONE = WM_APP + 2,
+};
 
 struct RectI { int x, y, w, h; };
 bool PtIn(const RectI& r, int px, int py);
@@ -46,7 +51,7 @@ extern Color C_SUB;
 extern Color C_ACC;
 
 enum class View { Home, Pick, Setup, Processing, Done };
-enum class Tool { None, Denoise, Merge, Rename };
+enum class Tool { None, Denoise, Merge, Rename, Crop };
 enum class DenoiseMode { Manga, Color, Balanced };
 enum class EditField { None, MergeName, RenPrefix, RenSuffix };
 
@@ -113,3 +118,27 @@ std::wstring PadNumber(int v, int width);
 
 void ClearAllStateToHome();
 void ClearToolStateKeepTool();
+
+struct CropSlice { int y0; int y1; }; 
+
+extern std::unique_ptr<Gdiplus::Bitmap> g_cropBmp;
+extern std::wstring g_cropSrcPath;
+
+extern int g_cropScrollY;
+extern int g_cropScrollMax;
+
+// Crop UI (horizontal slicing)
+// Photoshop-like horizontal guides (cut points) stored in image-space Y.
+extern std::vector<int> g_cropGuides;
+extern bool g_cropDragging;
+extern int  g_cropDragGuideIndex;
+extern float g_cropZoom; // 1.0 = fit-to-width baseline
+
+extern bool g_cropJpeg;        
+extern int  g_cropJpegQuality; 
+extern std::wstring g_cropPrefix; // filename part prefix for slices
+extern int g_cropPad; // zero padding width for slice number
+
+// Helpers for guide-based segmentation.
+void CropGetSortedGuides(int imgH, std::vector<int>& outGuides);
+int  CropGetSegmentCount(int imgH);
